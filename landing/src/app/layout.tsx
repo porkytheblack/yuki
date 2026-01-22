@@ -9,13 +9,16 @@ export const metadata: Metadata = {
   openGraph: {
     title: 'Yuki - Your Helpful Accountant',
     description: 'A personal finance tracker that accepts your chaos. Not a guilt machine.',
-    images: ['/yuki-icon.png'],
+    images: ['https://raw.githubusercontent.com/porkytheblack/yuki/refs/heads/main/landing/public/og-image.png'],
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
     title: 'Yuki - Your Helpful Accountant',
     description: 'A personal finance tracker that accepts your chaos. Not a guilt machine.',
+    images: [
+      "https://raw.githubusercontent.com/porkytheblack/yuki/refs/heads/main/landing/public/og-image.png"
+    ]
   },
   icons: {
     icon: '/yuki-icon.png',
