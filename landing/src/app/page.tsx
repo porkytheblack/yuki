@@ -93,7 +93,6 @@ export default function LandingPage() {
               height={32}
               className="rounded-full"
             />
-            <span className="font-semibold text-white">Yuki</span>
           </div>
           <div className="flex items-center gap-3">
             <a
