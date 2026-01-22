@@ -6102,9 +6102,11 @@ name = "yuki"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "dirs 5.0.1",
  "hex",
+ "lazy_static",
  "log",
  "pdf-extract",
  "reqwest",

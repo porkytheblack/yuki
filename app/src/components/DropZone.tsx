@@ -1,94 +1,107 @@
 "use client";
 
-import { useState, useEffect, ReactNode } from "react";
+import { useState, useEffect, useRef, useCallback, ReactNode } from "react";
 import { Upload } from "lucide-react";
 import { useAppStore } from "@/store/appStore";
-import { processFile, ProcessingResult } from "@/lib/fileProcessor";
+import { useToast } from "@/store/toastStore";
+import { processFile, type DocumentType } from "@/lib/fileProcessor";
 import { isTauri } from "@/lib/tauri";
+import { UploadTypeModal } from "./UploadTypeModal";
+
+// Play Yuki's thank you sound
+function playThankYouSound() {
+  try {
+    const audio = new Audio("/yuki/yuki-sound.mp3");
+    audio.volume = 0.5;
+    audio.play().catch(() => {
+      // Ignore autoplay restrictions
+    });
+  } catch {
+    // Ignore errors
+  }
+}
 
 interface DropZoneProps {
   children: ReactNode;
 }
 
+interface PendingFile {
+  path: string;
+  filename: string;
+  contents: ArrayBuffer;
+  mimeType: string;
+}
+
 export function DropZone({ children }: DropZoneProps) {
   const [isDragging, setIsDragging] = useState(false);
-  const { setIsAnalyzing, setError, setProcessingMessage, setCurrentResponse } = useAppStore();
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
+  const [currentFileIndex, setCurrentFileIndex] = useState(0);
+  const [showTypeModal, setShowTypeModal] = useState(false);
 
-  // Process files helper function
-  const handleFiles = async (paths: string[]) => {
-    if (paths.length === 0) return;
+  // Use ref for processing guard to avoid stale closure issues
+  const isProcessingRef = useRef(false);
+  // Use ref to store pending files for use in callbacks
+  const pendingFilesRef = useRef<PendingFile[]>([]);
+  const currentFileIndexRef = useRef(0);
 
-    console.log("[DropZone] Processing files:", paths);
-    setIsAnalyzing(true);
-    setError(null);
-    setProcessingMessage(`Processing ${paths.length} file${paths.length > 1 ? 's' : ''}...`);
+  const { setIsAnalyzing, setError, setProcessingMessage, setCurrentResponse, settings, triggerThankYou } = useAppStore();
+  const toast = useToast();
 
-    const results: ProcessingResult[] = [];
+  // Play Yuki's thank you sound and trigger animation if enabled
+  const playSound = useCallback(() => {
+    if (settings.soundEnabled) {
+      playThankYouSound();
+    }
+    // Always trigger the visual thank you animation
+    triggerThankYou();
+  }, [settings.soundEnabled, triggerThankYou]);
+
+  // Keep refs in sync with state
+  useEffect(() => {
+    pendingFilesRef.current = pendingFiles;
+  }, [pendingFiles]);
+
+  useEffect(() => {
+    currentFileIndexRef.current = currentFileIndex;
+  }, [currentFileIndex]);
+
+  // Handle when user selects document type
+  const handleTypeSelect = useCallback(async (documentType: DocumentType) => {
+    console.log("[DropZone] handleTypeSelect called with:", documentType);
+    const currentFile = pendingFilesRef.current[currentFileIndexRef.current];
+    if (!currentFile) {
+      console.log("[DropZone] No current file, returning");
+      return;
+    }
+
+    console.log("[DropZone] Processing file:", currentFile.filename, "as", documentType);
+    setShowTypeModal(false);
+
+    // Process this file with the selected type
+    const file = new File([currentFile.contents], currentFile.filename, { type: currentFile.mimeType });
 
     try {
-      for (const path of paths) {
-        const filename = path.split('/').pop() || path.split('\\').pop() || path;
-        setProcessingMessage(`Processing ${filename}...`);
+      setProcessingMessage(`Processing ${currentFile.filename}...`);
+      console.log("[DropZone] Calling processFile...");
+      const result = await processFile(file, documentType);
+      console.log("[DropZone] processFile returned:", result);
 
-        console.log("[DropZone] Reading file from path:", path);
-
-        // For Tauri, we need to read the file from the path
-        const { readFile } = await import("@tauri-apps/plugin-fs");
-        const contents = await readFile(path);
-        console.log("[DropZone] File read successfully, size:", contents.byteLength);
-
-        // Determine file type from extension
-        const ext = filename.split('.').pop()?.toLowerCase() || '';
-        const mimeTypes: Record<string, string> = {
-          pdf: "application/pdf",
-          csv: "text/csv",
-          txt: "text/plain",
-          png: "image/png",
-          jpg: "image/jpeg",
-          jpeg: "image/jpeg",
-          webp: "image/webp",
-        };
-        const mimeType = mimeTypes[ext] || "application/octet-stream";
-        console.log("[DropZone] Determined mime type:", mimeType);
-
-        // Create a File object from the contents
-        const file = new File([contents], filename, { type: mimeType });
-        console.log("[DropZone] Created File object, calling processFile...");
-
-        const result = await processFile(file);
-        console.log("[DropZone] processFile completed:", result);
-        results.push(result);
-      }
-
-      // Show success message as a response card
-      const totalTransactions = results.reduce((sum, r) => sum + r.transactionCount, 0);
-      const successMessage = results.length === 1
-        ? results[0].message
-        : `Processed ${results.length} files: found ${totalTransactions} transaction${totalTransactions !== 1 ? 's' : ''}.`;
-
+      // Show success and play sound
       setCurrentResponse({
         cards: [
           {
             type: "text",
             content: {
-              body: successMessage,
+              body: result.message,
             },
           },
         ],
       });
+      toast.success(`Processed ${result.filename}`);
+      playSound();
     } catch (err) {
       console.error("[DropZone] Processing error:", err);
-      // Extract more detailed error information
-      let errorMessage = "Failed to process file";
-      if (err instanceof Error) {
-        errorMessage = err.message;
-        console.error("[DropZone] Error stack:", err.stack);
-      } else if (typeof err === 'string') {
-        errorMessage = err;
-      } else if (err && typeof err === 'object') {
-        errorMessage = JSON.stringify(err);
-      }
-
+      const errorMessage = err instanceof Error ? err.message : "Failed to process file";
       setError(errorMessage);
       setCurrentResponse({
         cards: [
@@ -101,11 +114,32 @@ export function DropZone({ children }: DropZoneProps) {
           },
         ],
       });
-    } finally {
+      toast.error("Failed to process file");
+    }
+
+    // Move to next file or finish
+    const nextIndex = currentFileIndexRef.current + 1;
+    if (nextIndex < pendingFilesRef.current.length) {
+      setCurrentFileIndex(nextIndex);
+      setShowTypeModal(true);
+    } else {
+      // All done
+      setPendingFiles([]);
+      setCurrentFileIndex(0);
       setIsAnalyzing(false);
       setProcessingMessage(null);
+      isProcessingRef.current = false;
     }
-  };
+  }, [setProcessingMessage, setCurrentResponse, setError, setIsAnalyzing, toast, playSound]);
+
+  const handleTypeCancel = useCallback(() => {
+    setShowTypeModal(false);
+    setPendingFiles([]);
+    setCurrentFileIndex(0);
+    setIsAnalyzing(false);
+    setProcessingMessage(null);
+    isProcessingRef.current = false;
+  }, [setIsAnalyzing, setProcessingMessage]);
 
   // Set up Tauri drag/drop event listener
   useEffect(() => {
@@ -115,13 +149,16 @@ export function DropZone({ children }: DropZoneProps) {
     }
 
     let unlisten: (() => void) | undefined;
+    let isMounted = true;
 
     const setupListener = async () => {
       try {
         const { getCurrentWebview } = await import("@tauri-apps/api/webview");
         const webview = getCurrentWebview();
 
-        unlisten = await webview.onDragDropEvent((event) => {
+        unlisten = await webview.onDragDropEvent(async (event) => {
+          if (!isMounted) return;
+
           console.log("[DropZone] Tauri drag event:", event.payload.type);
 
           if (event.payload.type === 'over') {
@@ -130,7 +167,71 @@ export function DropZone({ children }: DropZoneProps) {
             setIsDragging(false);
             const paths = event.payload.paths;
             console.log("[DropZone] Files dropped:", paths);
-            handleFiles(paths);
+
+            // Handle files inline to avoid stale closure issues
+            if (paths.length === 0) return;
+
+            // Prevent duplicate processing using ref (synchronous check)
+            if (isProcessingRef.current) {
+              console.log("[DropZone] Already processing, ignoring duplicate request");
+              return;
+            }
+            isProcessingRef.current = true;
+
+            console.log("[DropZone] Starting file read process for:", paths);
+            setIsAnalyzing(true);
+            setError(null);
+            setProcessingMessage(`Reading ${paths.length} file${paths.length > 1 ? 's' : ''}...`);
+
+            try {
+              const files: PendingFile[] = [];
+
+              for (const path of paths) {
+                const filename = path.split('/').pop() || path.split('\\').pop() || path;
+
+                console.log("[DropZone] Reading file from path:", path);
+
+                // For Tauri, we need to read the file from the path
+                const { readFile } = await import("@tauri-apps/plugin-fs");
+                const rawContents = await readFile(path);
+                // Create a copy of the ArrayBuffer for File constructor compatibility
+                const contents = new ArrayBuffer(rawContents.byteLength);
+                new Uint8Array(contents).set(rawContents);
+                console.log("[DropZone] File read successfully, size:", rawContents.byteLength);
+
+                // Determine file type from extension
+                const ext = filename.split('.').pop()?.toLowerCase() || '';
+                const mimeTypes: Record<string, string> = {
+                  pdf: "application/pdf",
+                  csv: "text/csv",
+                  txt: "text/plain",
+                  png: "image/png",
+                  jpg: "image/jpeg",
+                  jpeg: "image/jpeg",
+                  webp: "image/webp",
+                };
+                const mimeType = mimeTypes[ext] || "application/octet-stream";
+
+                files.push({ path, filename, contents, mimeType });
+              }
+
+              // Store files and show type selection modal
+              console.log("[DropZone] Files read, showing type modal for:", files.map(f => f.filename));
+              console.log("[DropZone] IMPORTANT: Waiting for user selection before processing!");
+              setPendingFiles(files);
+              setCurrentFileIndex(0);
+              setShowTypeModal(true);
+              // Note: isProcessingRef stays true until user selects or cancels
+
+            } catch (err) {
+              console.error("[DropZone] Error reading files:", err);
+              const errorMessage = err instanceof Error ? err.message : "Failed to read file";
+              setError(errorMessage);
+              toast.error("Failed to read file");
+              setIsAnalyzing(false);
+              setProcessingMessage(null);
+              isProcessingRef.current = false;
+            }
           } else if (event.payload.type === 'leave') {
             setIsDragging(false);
           }
@@ -145,12 +246,15 @@ export function DropZone({ children }: DropZoneProps) {
     setupListener();
 
     return () => {
+      isMounted = false;
       if (unlisten) {
         console.log("[DropZone] Cleaning up Tauri drag/drop listener");
         unlisten();
       }
     };
-  }, []);
+  }, [setIsAnalyzing, setError, setProcessingMessage, toast]);
+
+  const currentFile = pendingFiles[currentFileIndex];
 
   return (
     <div className="relative min-h-screen w-full">
@@ -178,6 +282,15 @@ export function DropZone({ children }: DropZoneProps) {
             </p>
           </div>
         </div>
+      )}
+
+      {/* Document type selection modal */}
+      {showTypeModal && currentFile && (
+        <UploadTypeModal
+          filename={currentFile.filename}
+          onSelect={handleTypeSelect}
+          onCancel={handleTypeCancel}
+        />
       )}
     </div>
   );

@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 // Database models
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PdfExtractionResult {
+    pub text: String,
+    pub is_scanned: bool, // True if PDF appears to be a scan (little/no text)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
     pub id: String,
     pub filename: String,
@@ -12,10 +18,30 @@ pub struct Document {
     pub uploaded_at: String,
 }
 
+/// Account for multi-account ledger support
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Account {
+    pub id: String,
+    pub name: String,
+    pub account_type: String, // "checking", "savings", "credit", "cash", "investment", "other"
+    pub institution: Option<String>,
+    pub currency: String,
+    pub is_default: bool,
+    pub created_at: String,
+}
+
+/// Conversation message for maintaining chat context
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationMessage {
+    pub role: String, // "user" or "assistant"
+    pub content: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerEntry {
     pub id: String,
     pub document_id: Option<String>,
+    pub account_id: Option<String>,
     pub date: String,
     pub description: String,
     pub amount: f64,
@@ -31,7 +57,7 @@ pub struct LedgerEntry {
 pub struct Receipt {
     pub id: String,
     pub document_id: String,
-    pub ledger_id: String,
+    pub ledger_id: Option<String>,  // Optional - receipts don't create ledger entries
     pub merchant: String,
     pub items: Vec<ReceiptItem>,
     pub tax: Option<f64>,
@@ -42,6 +68,35 @@ pub struct Receipt {
 pub struct ReceiptItem {
     pub name: String,
     pub amount: f64,
+}
+
+/// Granular purchased item for detailed receipt tracking
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PurchasedItem {
+    pub id: String,
+    pub receipt_id: Option<String>,
+    pub ledger_id: Option<String>,  // Optional - receipts don't create ledger entries
+    pub name: String,
+    pub quantity: f64,
+    pub unit: Option<String>,        // "lb", "oz", "each", "kg", etc.
+    pub unit_price: Option<f64>,
+    pub total_price: f64,
+    pub category: Option<String>,    // "produce", "dairy", "meat", "snacks", etc.
+    pub brand: Option<String>,
+    pub purchased_at: String,
+    pub created_at: String,
+}
+
+/// Parsed item from receipt with more detail for LLM extraction
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParsedReceiptItem {
+    pub name: String,
+    pub quantity: Option<f64>,
+    pub unit: Option<String>,
+    pub unit_price: Option<f64>,
+    pub total_price: f64,
+    pub category: Option<String>,
+    pub brand: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,7 +215,7 @@ pub struct ExtractedTransaction {
 pub struct ParsedReceipt {
     pub merchant: String,
     pub date: String,
-    pub items: Vec<ReceiptItem>,
+    pub items: Vec<ParsedReceiptItem>,
     pub tax: Option<f64>,
     pub total: f64,
     pub category: String,

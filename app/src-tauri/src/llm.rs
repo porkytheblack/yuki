@@ -1,11 +1,39 @@
 use anyhow::Result;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use reqwest::Client;
 use serde_json::json;
 
 use crate::models::{
-    ExpenseDetectionResult, ExtractedTransaction, LLMProvider, ParsedReceipt, ResponseCard,
-    ResponseData, TextContent,
+    ConversationMessage, ExpenseDetectionResult, ExtractedTransaction, LLMProvider, ParsedReceipt,
+    ResponseCard, ResponseData, TextContent,
 };
+
+/// Encode bytes as base64 string
+fn base64_encode(data: &[u8]) -> String {
+    BASE64_STANDARD.encode(data)
+}
+
+/// Build conversation context from message history for inclusion in prompts
+fn build_conversation_context(history: &[ConversationMessage]) -> String {
+    if history.is_empty() {
+        return String::new();
+    }
+
+    let mut context = String::from("\n\n## Recent Conversation History\n");
+    for msg in history.iter().take(10) {
+        // Limit to last 10 messages
+        let role = if msg.role == "user" { "User" } else { "Yuki" };
+        // Truncate long messages for context
+        let content = if msg.content.len() > 500 {
+            format!("{}...", &msg.content[..500])
+        } else {
+            msg.content.clone()
+        };
+        context.push_str(&format!("{}: {}\n", role, content));
+    }
+    context.push_str("\n---\nCurrent message:\n");
+    context
+}
 
 /// Build the appropriate request for different LLM providers
 pub async fn call_llm(
@@ -34,6 +62,194 @@ pub async fn call_llm(
     }
 
     result
+}
+
+/// Call LLM with vision (image/PDF input)
+pub async fn call_llm_with_vision(
+    provider: &LLMProvider,
+    prompt: &str,
+    image_base64: &str,
+    media_type: &str,
+    system_prompt: Option<&str>,
+) -> Result<String> {
+    let client = Client::new();
+
+    log::info!("Calling LLM provider with vision: {} (media: {})", provider.provider_type, media_type);
+
+    let result = match provider.provider_type.as_str() {
+        "anthropic" => call_anthropic_vision(&client, provider, prompt, image_base64, media_type, system_prompt).await,
+        "openai" | "openrouter" => call_openai_vision(&client, provider, prompt, image_base64, media_type, system_prompt).await,
+        _ => Err(anyhow::anyhow!("Vision not supported for provider: {}", provider.provider_type)),
+    };
+
+    match &result {
+        Ok(response) => log::debug!("LLM vision response: {}", response),
+        Err(e) => log::error!("LLM vision error: {}", e),
+    }
+
+    result
+}
+
+async fn call_anthropic_vision(
+    client: &Client,
+    provider: &LLMProvider,
+    prompt: &str,
+    image_base64: &str,
+    media_type: &str,
+    system_prompt: Option<&str>,
+) -> Result<String> {
+    let api_key = provider
+        .api_key
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("API key required for Anthropic"))?;
+
+    log::info!("[Anthropic Vision] Sending request with media type: {}, base64 length: {}", media_type, image_base64.len());
+
+    // For PDFs, use document type; for images, use image type
+    let content_block = if media_type == "application/pdf" {
+        json!({
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": image_base64
+            }
+        })
+    } else {
+        json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": image_base64
+            }
+        })
+    };
+
+    let mut body = json!({
+        "model": provider.model,
+        "max_tokens": 4096,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    content_block,
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
+                ]
+            }
+        ]
+    });
+
+    if let Some(sys) = system_prompt {
+        body["system"] = json!(sys);
+    }
+
+    let mut request = client
+        .post(format!("{}/messages", provider.endpoint))
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json");
+
+    // Add beta header for PDF support
+    if media_type == "application/pdf" {
+        log::info!("[Anthropic Vision] Adding PDF beta header");
+        request = request.header("anthropic-beta", "pdfs-2024-09-25");
+    }
+
+    let response = request.json(&body).send().await?;
+
+    let status = response.status();
+    log::info!("[Anthropic Vision] Response status: {}", status);
+
+    let response_body: serde_json::Value = response.json().await?;
+    log::debug!("[Anthropic Vision] Response body: {:?}", response_body);
+
+    if !status.is_success() {
+        let error_msg = response_body["error"]["message"]
+            .as_str()
+            .unwrap_or("Unknown error");
+        log::error!("[Anthropic Vision] API error: {} - Full response: {:?}", error_msg, response_body);
+        return Err(anyhow::anyhow!("Anthropic Vision API error: {}", error_msg));
+    }
+
+    response_body["content"][0]["text"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::anyhow!("Invalid response from Anthropic Vision: {:?}", response_body))
+}
+
+async fn call_openai_vision(
+    client: &Client,
+    provider: &LLMProvider,
+    prompt: &str,
+    image_base64: &str,
+    media_type: &str,
+    system_prompt: Option<&str>,
+) -> Result<String> {
+    log::info!("[OpenAI Vision] Sending request with media type: {}, base64 length: {}", media_type, image_base64.len());
+
+    let mut messages = vec![];
+
+    if let Some(sys) = system_prompt {
+        messages.push(json!({
+            "role": "system",
+            "content": sys
+        }));
+    }
+
+    messages.push(json!({
+        "role": "user",
+        "content": [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:{};base64,{}", media_type, image_base64)
+                }
+            },
+            {
+                "type": "text",
+                "text": prompt
+            }
+        ]
+    }));
+
+    let body = json!({
+        "model": provider.model,
+        "messages": messages,
+        "max_tokens": 4096
+    });
+
+    let mut request = client
+        .post(format!("{}/chat/completions", provider.endpoint))
+        .header("content-type", "application/json")
+        .json(&body);
+
+    if let Some(api_key) = &provider.api_key {
+        request = request.header("Authorization", format!("Bearer {}", api_key));
+    }
+
+    let response = request.send().await?;
+    let status = response.status();
+    log::info!("[OpenAI Vision] Response status: {}", status);
+
+    let response_body: serde_json::Value = response.json().await?;
+    log::debug!("[OpenAI Vision] Response body: {:?}", response_body);
+
+    if !status.is_success() {
+        let error_msg = response_body["error"]["message"]
+            .as_str()
+            .unwrap_or("Unknown error");
+        log::error!("[OpenAI Vision] API error: {} - Full response: {:?}", error_msg, response_body);
+        return Err(anyhow::anyhow!("OpenAI Vision API error: {}", error_msg));
+    }
+
+    response_body["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::anyhow!("Invalid response from OpenAI Vision: {:?}", response_body))
 }
 
 async fn call_anthropic(
@@ -376,41 +592,196 @@ Rules:
     Ok(transactions)
 }
 
-/// Parse a receipt image
-pub async fn parse_receipt_with_llm(
+/// Parse receipt text with detailed item extraction (for text/PDF receipts)
+pub async fn parse_receipt_text_with_llm(
     provider: &LLMProvider,
-    _image_path: &str,
+    text: &str,
     categories: &[String],
 ) -> Result<ParsedReceipt> {
-    // Note: For now, this returns a placeholder since vision requires base64 encoding
-    // In a full implementation, you'd read the image and send it as base64
     let categories_str = categories.join(", ");
 
     let system_prompt = format!(
-        r#"You are analyzing a receipt image. Extract:
-- merchant: Store/restaurant name
-- date: YYYY-MM-DD format
-- items: Array of {{name, amount}}
-- tax: Tax amount or null
-- total: Total amount
-- category: One of: {}
+        r#"You are analyzing a receipt. Extract detailed item information for tracking purchases.
+
+Output JSON format:
+{{
+  "merchant": "Store name",
+  "date": "YYYY-MM-DD",
+  "items": [
+    {{
+      "name": "product-name-in-kebab-case",
+      "quantity": 2.5,
+      "unit": "lb" | "oz" | "kg" | "g" | "each" | "pack" | null,
+      "unit_price": 3.99,
+      "total_price": 9.97,
+      "category": "produce" | "dairy" | "meat" | "seafood" | "bakery" | "frozen" | "beverages" | "snacks" | "pantry" | "household" | "personal_care" | "alcohol" | "other",
+      "brand": "Brand name" | null
+    }}
+  ],
+  "tax": 2.50,
+  "total": 45.67,
+  "category": "{}"
+}}
+
+CRITICAL Item extraction rules:
+- Extract EVERY individual line item from the receipt - DO NOT SUMMARIZE
+- Product names MUST be in lowercase kebab-case (e.g., "pumpkin-spice-latte", "chicken-sandwich", "iced-coffee")
+- Remove store codes, SKUs, abbreviations - use clean descriptive names
+- Parse quantity and unit when available
+- If no quantity shown, assume quantity: 1
+- Categorize items appropriately:
+  - produce: fruits, vegetables
+  - dairy: milk, cheese, yogurt, butter
+  - meat: chicken, beef, pork
+  - seafood: fish, shrimp
+  - bakery: bread, bagels, pastries
+  - frozen: frozen meals, ice cream
+  - beverages: coffee, tea, water, juice, soda
+  - snacks: chips, candy, cookies
+  - pantry: canned goods, condiments, seasonings
+  - household: cleaning supplies
+  - personal_care: hygiene products
+  - alcohol: beer, wine, spirits
+  - other: anything else
+- Extract brand names when visible (e.g., "Starbucks", "Trader Joe's")
+- unit_price is price per unit, total_price is the line item total
+
+IMPORTANT: Extract ALL items individually. Do not combine or summarize multiple items.
 
 Output only valid JSON."#,
         categories_str
     );
 
-    let prompt = "Analyze this receipt and extract the financial data.";
+    let prompt = format!("Analyze this receipt and extract detailed item information:\n\n{}", text);
 
-    let response = call_llm(provider, prompt, Some(&system_prompt)).await?;
+    let response = call_llm(provider, &prompt, Some(&system_prompt)).await?;
 
-    let receipt: ParsedReceipt = serde_json::from_str(&response).unwrap_or(ParsedReceipt {
-        merchant: "Unknown".to_string(),
-        date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
-        items: vec![],
-        tax: None,
-        total: 0.0,
-        category: "Other".to_string(),
-    });
+    // Try to parse JSON from response
+    let receipt: ParsedReceipt = serde_json::from_str(&response)
+        .or_else(|_| {
+            // Try to extract JSON from response
+            let json_start = response.find('{').unwrap_or(0);
+            let json_end = response.rfind('}').map(|i| i + 1).unwrap_or(response.len());
+            serde_json::from_str(&response[json_start..json_end])
+        })
+        .unwrap_or(ParsedReceipt {
+            merchant: "Unknown".to_string(),
+            date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            items: vec![],
+            tax: None,
+            total: 0.0,
+            category: "Other".to_string(),
+        });
+
+    Ok(receipt)
+}
+
+/// Parse a receipt image/PDF with detailed item extraction using vision
+pub async fn parse_receipt_with_llm(
+    provider: &LLMProvider,
+    image_path: &str,
+    categories: &[String],
+) -> Result<ParsedReceipt> {
+    let categories_str = categories.join(", ");
+
+    // Read the file and encode as base64
+    let file_data = std::fs::read(image_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read file {}: {}", image_path, e))?;
+    let base64_data = base64_encode(&file_data);
+
+    // Determine media type from extension
+    let media_type = if image_path.to_lowercase().ends_with(".pdf") {
+        "application/pdf"
+    } else if image_path.to_lowercase().ends_with(".png") {
+        "image/png"
+    } else if image_path.to_lowercase().ends_with(".jpg") || image_path.to_lowercase().ends_with(".jpeg") {
+        "image/jpeg"
+    } else if image_path.to_lowercase().ends_with(".webp") {
+        "image/webp"
+    } else {
+        "image/jpeg" // Default fallback
+    };
+
+    log::info!("[parse_receipt_with_llm] File: {} ({}), size: {} bytes", image_path, media_type, file_data.len());
+    log::info!("[parse_receipt_with_llm] Base64 length: {}", base64_data.len());
+
+    let system_prompt = format!(
+        r#"You are analyzing a receipt image or scanned document. Extract detailed item information for tracking purchases.
+
+Output JSON format:
+{{
+  "merchant": "Store name",
+  "date": "YYYY-MM-DD",
+  "items": [
+    {{
+      "name": "product-name-in-kebab-case",
+      "quantity": 2.5,
+      "unit": "lb" | "oz" | "kg" | "g" | "each" | "pack" | null,
+      "unit_price": 3.99,
+      "total_price": 9.97,
+      "category": "produce" | "dairy" | "meat" | "seafood" | "bakery" | "frozen" | "beverages" | "snacks" | "pantry" | "household" | "personal_care" | "alcohol" | "other",
+      "brand": "Brand name" | null
+    }}
+  ],
+  "tax": 2.50,
+  "total": 45.67,
+  "category": "{}"
+}}
+
+CRITICAL Item extraction rules:
+- Extract EVERY individual line item from the receipt - DO NOT SUMMARIZE
+- Product names MUST be in lowercase kebab-case (e.g., "pumpkin-spice-latte", "chicken-sandwich", "iced-coffee")
+- Remove store codes, SKUs, abbreviations - use clean descriptive names
+- Parse quantity and unit when available
+- If no quantity shown, assume quantity: 1
+- Categorize items appropriately:
+  - produce: fruits, vegetables
+  - dairy: milk, cheese, yogurt, butter
+  - meat: chicken, beef, pork
+  - seafood: fish, shrimp
+  - bakery: bread, bagels, pastries
+  - frozen: frozen meals, ice cream
+  - beverages: coffee, tea, water, juice, soda
+  - snacks: chips, candy, cookies
+  - pantry: canned goods, condiments, seasonings
+  - household: cleaning supplies
+  - personal_care: hygiene products
+  - alcohol: beer, wine, spirits
+  - other: anything else
+- Extract brand names when visible
+- unit_price is price per unit, total_price is the line item total
+
+IMPORTANT: Extract ALL items individually. Do not combine or summarize multiple items.
+
+Output only valid JSON."#,
+        categories_str
+    );
+
+    // Call vision API with the image
+    let response = call_llm_with_vision(
+        provider,
+        "Analyze this receipt image and extract detailed item information.",
+        &base64_data,
+        media_type,
+        Some(&system_prompt),
+    ).await?;
+
+    // Try to parse JSON from response
+    let receipt: ParsedReceipt = serde_json::from_str(&response)
+        .or_else(|_| {
+            // Try to extract JSON from response
+            let json_start = response.find('{').unwrap_or(0);
+            let json_end = response.rfind('}').map(|i| i + 1).unwrap_or(response.len());
+            serde_json::from_str(&response[json_start..json_end])
+        })
+        .unwrap_or(ParsedReceipt {
+            merchant: "Unknown".to_string(),
+            date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            items: vec![],
+            tax: None,
+            total: 0.0,
+            category: "Other".to_string(),
+        });
 
     Ok(receipt)
 }
@@ -467,7 +838,11 @@ pub struct QueryAnalysis {
 }
 
 /// Analyze a user query to determine if it needs data from the database
-pub async fn analyze_query(provider: &LLMProvider, question: &str) -> Result<QueryAnalysis> {
+pub async fn analyze_query(
+    provider: &LLMProvider,
+    question: &str,
+    history: &[ConversationMessage],
+) -> Result<QueryAnalysis> {
     log::info!("Analyzing query: {}", question);
 
     let system_prompt = r#"You are a query analyzer for a personal finance app using SQLite. Analyze the user's question and determine:
@@ -487,9 +862,20 @@ CREATE TABLE categories (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE accounts (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,           -- e.g., "Main Checking", "Savings"
+    account_type TEXT NOT NULL,   -- "checking", "savings", "credit", "cash", "investment", "other"
+    institution TEXT,             -- Bank/financial institution name
+    currency TEXT NOT NULL DEFAULT 'USD',
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE ledger (
     id TEXT PRIMARY KEY,
     document_id TEXT,
+    account_id TEXT,              -- References accounts.id (nullable, defaults to 'default')
     date TEXT NOT NULL,           -- ISO 8601 format: "2025-10-15"
     description TEXT NOT NULL,
     amount REAL NOT NULL,         -- NEGATIVE for expenses, POSITIVE for income
@@ -499,7 +885,25 @@ CREATE TABLE ledger (
     notes TEXT,
     source TEXT NOT NULL,         -- "document", "image", "conversation", "manual"
     created_at TEXT NOT NULL,
+    FOREIGN KEY (account_id) REFERENCES accounts(id),
     FOREIGN KEY (category_id) REFERENCES categories(id)
+);
+
+-- Granular item tracking from receipts (grocery items, individual purchases)
+CREATE TABLE purchased_items (
+    id TEXT PRIMARY KEY,
+    receipt_id TEXT,              -- Optional link to receipts table
+    ledger_id TEXT NOT NULL,      -- Links to ledger transaction
+    name TEXT NOT NULL,           -- Item name (e.g., "apples", "milk", "bread")
+    quantity REAL NOT NULL DEFAULT 1,
+    unit TEXT,                    -- "lb", "oz", "kg", "g", "each", "pack", etc.
+    unit_price REAL,
+    total_price REAL NOT NULL,
+    category TEXT,                -- Item category: "produce", "dairy", "meat", "seafood", "bakery", "frozen", "beverages", "snacks", "pantry", "household", "personal_care", "other"
+    brand TEXT,
+    purchased_at TEXT NOT NULL,   -- Date of purchase
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (ledger_id) REFERENCES ledger(id) ON DELETE CASCADE
 );
 ```
 
@@ -514,6 +918,12 @@ IMPORTANT DATE HANDLING:
 - The user's data may not be from the current calendar month, so use relative queries
 - To get the most recent month's data: WHERE strftime('%Y-%m', date) = (SELECT strftime('%Y-%m', date) FROM ledger ORDER BY date DESC LIMIT 1)
 
+ITEM QUERIES (purchased_items table):
+- For questions about specific items (apples, milk, coffee, etc.), use the purchased_items table
+- Use LIKE for fuzzy matching: name LIKE '%apple%'
+- Sum quantities: SUM(quantity)
+- Sum spending: SUM(total_price)
+
 Respond with JSON only:
 {
   "needs_data": true/false,
@@ -527,15 +937,21 @@ Examples:
 - "spending by category" -> {"needs_data": true, "sql_query": "SELECT c.name, SUM(ABS(l.amount)) as total FROM ledger l JOIN categories c ON l.category_id = c.id WHERE l.amount < 0 GROUP BY c.name ORDER BY total DESC", "query_type": "data_query"}
 - "spending this month" or "recent spending" -> {"needs_data": true, "sql_query": "SELECT SUM(ABS(amount)) as total FROM ledger WHERE amount < 0 AND strftime('%Y-%m', date) = (SELECT strftime('%Y-%m', date) FROM ledger ORDER BY date DESC LIMIT 1)", "query_type": "data_query"}
 - "recent transactions" -> {"needs_data": true, "sql_query": "SELECT date, description, amount, category_id, merchant FROM ledger ORDER BY date DESC LIMIT 10", "query_type": "data_query"}
-- "what did I spend most on this month?" or "biggest expense category" -> {"needs_data": true, "sql_query": "SELECT c.name, SUM(ABS(l.amount)) as total FROM ledger l JOIN categories c ON l.category_id = c.id WHERE l.amount < 0 AND strftime('%Y-%m', l.date) = (SELECT strftime('%Y-%m', date) FROM ledger ORDER BY date DESC LIMIT 1) GROUP BY c.name ORDER BY total DESC LIMIT 1", "query_type": "data_query"}
-- "total spending" or "how much have I spent" -> {"needs_data": true, "sql_query": "SELECT SUM(ABS(amount)) as total FROM ledger WHERE amount < 0", "query_type": "data_query"}
-- "my income" -> {"needs_data": true, "sql_query": "SELECT SUM(amount) as total FROM ledger WHERE amount > 0", "query_type": "data_query"}
+- "how many apples did I buy last month?" -> {"needs_data": true, "sql_query": "SELECT SUM(quantity) as total_quantity, SUM(total_price) as total_spent FROM purchased_items WHERE name LIKE '%apple%' AND strftime('%Y-%m', purchased_at) = (SELECT strftime('%Y-%m', purchased_at) FROM purchased_items ORDER BY purchased_at DESC LIMIT 1)", "query_type": "data_query"}
+- "how much did I spend on milk?" -> {"needs_data": true, "sql_query": "SELECT SUM(total_price) as total FROM purchased_items WHERE name LIKE '%milk%'", "query_type": "data_query"}
+- "what groceries did I buy recently?" -> {"needs_data": true, "sql_query": "SELECT name, quantity, unit, total_price, purchased_at FROM purchased_items ORDER BY purchased_at DESC LIMIT 20", "query_type": "data_query"}
+- "spending on produce" -> {"needs_data": true, "sql_query": "SELECT SUM(total_price) as total FROM purchased_items WHERE category = 'produce'", "query_type": "data_query"}
+- "most bought items" -> {"needs_data": true, "sql_query": "SELECT name, SUM(quantity) as total_qty, COUNT(*) as times_bought FROM purchased_items GROUP BY name ORDER BY total_qty DESC LIMIT 10", "query_type": "data_query"}
 - "how can I save money?" -> {"needs_data": false, "sql_query": null, "query_type": "advice"}
 
 Output ONLY valid JSON, no markdown."#;
 
+    // Build prompt with conversation history for context
+    let context = build_conversation_context(history);
+    let full_prompt = format!("{}{}", context, question);
+
     log::info!("[ANALYZE] Sending query to LLM for analysis...");
-    let response_text = call_llm(provider, question, Some(system_prompt)).await?;
+    let response_text = call_llm(provider, &full_prompt, Some(system_prompt)).await?;
     log::info!("[ANALYZE] Raw LLM response: {}", response_text);
 
     // Parse the response
@@ -584,16 +1000,33 @@ pub async fn format_query_results(
     provider: &LLMProvider,
     question: &str,
     data: &str,
+    history: &[ConversationMessage],
 ) -> Result<ResponseData> {
     log::info!("[FORMAT] Formatting query results...");
     log::info!("[FORMAT] Original question: {}", question);
     log::info!("[FORMAT] Data to format: {}", data);
 
-    let system_prompt = r#"You are Yuki, a friendly personal finance assistant. Format the query results into a helpful response.
+    let system_prompt = r#"You are Yuki, a friendly personal finance assistant. Format query results into clear, actionable responses.
 
-The user asked a question and here are the results from the database. Create a response with appropriate visualizations.
+STYLE GUIDELINES:
+- Be concise: Get to the point quickly. No filler words.
+- Be specific: Use exact numbers. "You spent $1,234.56" not "You spent a lot."
+- Be insightful: Add brief context when helpful (e.g., "That's 15% more than last month")
+- Use markdown: Bold key numbers, use bullet points for lists
 
-Response format (JSON only):
+RESPONSE RULES:
+1. Start with the direct answer to their question
+2. Add one brief insight or suggestion if relevant
+3. Keep text under 3 sentences unless showing a breakdown
+
+VISUALIZATION RULES:
+- Simple totals → text only (e.g., "Your total spending: **$2,345.67**")
+- Category breakdown → pie chart (limit to top 5-6 categories)
+- Transaction list → table (max 10 rows)
+- Time trends → line chart
+- Comparison → bar chart
+
+Response format (JSON):
 {
   "cards": [
     {
@@ -603,25 +1036,19 @@ Response format (JSON only):
   ]
 }
 
-Card types:
-- text: { "body": "Your message here" }
-- chart: { "chart_type": "pie" | "bar" | "line", "title": "...", "data": [{"label": "Category", "value": 123.45}], "caption": "optional" }
-- table: { "title": "...", "columns": ["Date", "Description", "Amount"], "rows": [["2024-01-01", "Coffee", "$5.00"]] }
+Card content schemas:
+- text: { "body": "Markdown text here" }
+- chart: { "chart_type": "pie"|"bar"|"line", "title": "...", "data": [{"label": "...", "value": 123.45}], "caption": "optional" }
+- table: { "title": "...", "columns": ["Col1", "Col2"], "rows": [["val1", "val2"]] }
 - mixed: { "body": "Summary text", "chart": { chart content } }
 
-Guidelines:
-- For spending totals: Use a simple text response with the amount formatted nicely
-- For spending by category: Use a pie or bar chart
-- For transaction lists: Use a table
-- For trends over time: Use a line chart
-- Always be warm and helpful in your text responses
-- Format currency values with $ and 2 decimal places
+Output ONLY valid JSON."#;
 
-Output ONLY valid JSON, no markdown."#;
-
+    // Build prompt with conversation history
+    let context = build_conversation_context(history);
     let prompt = format!(
-        "User question: {}\n\nQuery results:\n{}",
-        question, data
+        "{}User question: {}\n\nQuery results:\n{}",
+        context, question, data
     );
 
     log::info!("[FORMAT] Sending to LLM for formatting...");
@@ -637,39 +1064,49 @@ Output ONLY valid JSON, no markdown."#;
 pub async fn process_conversational_query(
     provider: &LLMProvider,
     question: &str,
+    history: &[ConversationMessage],
 ) -> Result<ResponseData> {
     log::info!("[CONVO] Processing conversational query: {}", question);
 
-    let system_prompt = r#"You are Yuki, a friendly personal finance assistant. Respond to the user in a warm, helpful way.
+    let system_prompt = r#"You are Yuki, a friendly personal finance assistant.
 
-Your personality:
-- Warm, helpful, and concise
-- You speak naturally, not robotically
-- You're knowledgeable about personal finance
+PERSONALITY:
+- Warm but concise - friendly without being verbose
+- Direct and practical - give actionable advice
+- Knowledgeable about budgeting, saving, and financial wellness
 
-For greetings, welcome them and mention you can help with:
-- Tracking expenses
-- Analyzing spending patterns
-- Answering questions about their finances
+RESPONSE GUIDELINES:
+- Keep responses brief (2-4 sentences for simple queries)
+- Use markdown for formatting (**bold** for emphasis, bullet points for lists)
+- Reference conversation history naturally when relevant
+- For advice questions, give 2-3 concrete, actionable tips
 
-For advice questions, provide helpful tips.
+GREETING RESPONSE:
+When greeting, briefly mention you can help with:
+- Tracking and analyzing spending
+- Answering questions about finances
+- Providing budgeting tips
 
-Response format (JSON only):
+Response format (JSON):
 {
   "cards": [
     {
       "type": "text",
       "content": {
-        "body": "Your friendly response here"
+        "body": "Your response with **markdown** formatting"
       }
     }
   ]
 }
 
-Output ONLY valid JSON, no markdown."#;
+Output ONLY valid JSON."#;
+
+    // Build prompt with conversation history
+    let context = build_conversation_context(history);
+    let full_prompt = format!("{}{}", context, question);
 
     log::info!("[CONVO] Sending to LLM...");
-    let response_text = call_llm(provider, question, Some(system_prompt)).await?;
+    let response_text = call_llm(provider, &full_prompt, Some(system_prompt)).await?;
     log::info!("[CONVO] Raw LLM response: {}", response_text);
 
     parse_llm_response(&response_text)

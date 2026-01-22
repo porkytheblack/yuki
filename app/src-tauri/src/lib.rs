@@ -42,9 +42,23 @@ pub fn run() {
             commands::add_category,
             // Receipt commands
             commands::save_receipt,
+            // Purchased items commands
+            commands::save_purchased_item,
+            commands::save_purchased_items,
+            commands::get_purchased_items,
+            commands::delete_purchased_item,
+            // Conversation commands
+            commands::start_conversation,
+            commands::get_or_create_session,
+            commands::clear_conversation,
+            // Account commands
+            commands::get_all_accounts,
+            commands::add_account,
+            commands::delete_account,
             // Query commands
             commands::process_query,
             commands::parse_document_text,
+            commands::parse_receipt_text,
             commands::parse_receipt_image,
             commands::detect_expense,
         ])

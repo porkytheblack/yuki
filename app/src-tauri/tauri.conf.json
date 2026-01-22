@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Yuki - Your Little Helper for Finances",
+        "title": "Yuki",
         "width": 1000,
         "height": 700,
         "minWidth": 600,
@@ -21,7 +21,9 @@
         "resizable": true,
         "fullscreen": false,
         "center": true,
-        "dragDropEnabled": true
+        "dragDropEnabled": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {

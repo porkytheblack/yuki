@@ -4,7 +4,7 @@ import { sendQuery, detectExpense } from "./llm";
 // Mock __TAURI__ to not be defined (browser mode)
 beforeEach(() => {
   vi.stubGlobal("window", { ...window });
-  delete (window as Record<string, unknown>).__TAURI__;
+  delete (window as unknown as Record<string, unknown>).__TAURI__;
 });
 
 describe("llm (browser mode)", () => {

@@ -183,7 +183,12 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
   const canProceedToModel = isLocal || apiKey;
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 bg-neutral-50 dark:bg-neutral-900">
+    <div className="min-h-screen flex items-center justify-center p-4 pt-12 bg-neutral-50 dark:bg-neutral-900">
+      {/* Drag region for window titlebar */}
+      <div
+        data-tauri-drag-region
+        className="fixed top-0 left-0 right-0 h-8 z-50"
+      />
       <div className="w-full max-w-lg bg-neutral-0 dark:bg-neutral-800 rounded-xl shadow-lg p-8">
         {/* Header */}
         <div className="text-center mb-8">

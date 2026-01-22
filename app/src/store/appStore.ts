@@ -42,6 +42,12 @@ interface AppStore {
   settings: Settings;
   setSettings: (settings: Settings) => void;
   setProvider: (provider: LLMProvider) => void;
+  setSoundEnabled: (enabled: boolean) => void;
+
+  // Yuki status
+  showThankYou: boolean;
+  triggerThankYou: () => void;
+  clearThankYou: () => void;
 
   // Error handling
   error: string | null;
@@ -53,6 +59,7 @@ const defaultSettings: Settings = {
   provider: null,
   defaultCurrency: "USD",
   theme: "system",
+  soundEnabled: true,
 };
 
 export const useAppStore = create<AppStore>((set, get) => ({
@@ -160,6 +167,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
     setSettings({ ...settings, provider });
     set({ needsSetup: false });
   },
+  setSoundEnabled: (enabled) => {
+    const { settings, setSettings } = get();
+    setSettings({ ...settings, soundEnabled: enabled });
+  },
+
+  // Yuki status
+  showThankYou: false,
+  triggerThankYou: () => set({ showThankYou: true }),
+  clearThankYou: () => set({ showThankYou: false }),
 
   // Error handling
   error: null,

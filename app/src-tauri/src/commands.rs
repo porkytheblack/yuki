@@ -1,9 +1,15 @@
 use std::fs;
+use std::sync::Mutex;
 use tauri::AppHandle;
 
 use crate::database;
 use crate::llm;
 use crate::models::*;
+
+// Global conversation state - stores the current session ID and recent messages
+lazy_static::lazy_static! {
+    static ref CURRENT_SESSION: Mutex<Option<String>> = Mutex::new(None);
+}
 
 // ============================================================================
 // Settings Commands
@@ -213,10 +219,34 @@ pub async fn delete_document(app: AppHandle, document_id: String) -> Result<(), 
 }
 
 #[tauri::command]
-pub async fn extract_pdf_text(data: Vec<u8>) -> Result<String, String> {
-    // Use pdf-extract to get text
-    let text = pdf_extract::extract_text_from_mem(&data).map_err(|e| e.to_string())?;
-    Ok(text)
+pub async fn extract_pdf_text(data: Vec<u8>) -> Result<PdfExtractionResult, String> {
+    // Use pdf-extract to get text - handle errors gracefully for scanned PDFs
+    let text = match pdf_extract::extract_text_from_mem(&data) {
+        Ok(t) => t,
+        Err(e) => {
+            // If extraction fails, it's likely a scanned/image-based PDF
+            log::warn!("PDF text extraction failed (likely scanned PDF): {}", e);
+            String::new()
+        }
+    };
+
+    // Check if this looks like a scanned PDF (very little extractable text)
+    // A scanned PDF typically has no text or just a few characters from OCR artifacts
+    let clean_text = text.trim();
+    let word_count = clean_text.split_whitespace().count();
+    let is_scanned = clean_text.len() < 50 || word_count < 10;
+
+    log::info!(
+        "PDF extraction: {} chars, {} words, is_scanned: {}",
+        clean_text.len(),
+        word_count,
+        is_scanned
+    );
+
+    Ok(PdfExtractionResult {
+        text,
+        is_scanned,
+    })
 }
 
 // ============================================================================
@@ -228,11 +258,12 @@ pub async fn save_ledger_entry(app: AppHandle, entry: LedgerEntry) -> Result<(),
     let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
 
     conn.execute(
-        "INSERT INTO ledger (id, document_id, date, description, amount, currency, category_id, merchant, notes, source, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO ledger (id, document_id, account_id, date, description, amount, currency, category_id, merchant, notes, source, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         rusqlite::params![
             &entry.id,
             &entry.document_id,
+            &entry.account_id,
             &entry.date,
             &entry.description,
             entry.amount,
@@ -255,7 +286,7 @@ pub async fn get_all_transactions(app: AppHandle) -> Result<Vec<LedgerEntry>, St
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, document_id, date, description, amount, currency, category_id, merchant, notes, source, created_at
+            "SELECT id, document_id, account_id, date, description, amount, currency, category_id, merchant, notes, source, created_at
              FROM ledger ORDER BY date DESC, created_at DESC",
         )
         .map_err(|e| e.to_string())?;
@@ -265,15 +296,16 @@ pub async fn get_all_transactions(app: AppHandle) -> Result<Vec<LedgerEntry>, St
             Ok(LedgerEntry {
                 id: row.get(0)?,
                 document_id: row.get(1)?,
-                date: row.get(2)?,
-                description: row.get(3)?,
-                amount: row.get(4)?,
-                currency: row.get(5)?,
-                category_id: row.get(6)?,
-                merchant: row.get(7)?,
-                notes: row.get(8)?,
-                source: row.get(9)?,
-                created_at: row.get(10)?,
+                account_id: row.get::<_, Option<String>>(2).unwrap_or(Some("default".to_string())),
+                date: row.get(3)?,
+                description: row.get(4)?,
+                amount: row.get(5)?,
+                currency: row.get(6)?,
+                category_id: row.get(7)?,
+                merchant: row.get(8)?,
+                notes: row.get(9)?,
+                source: row.get(10)?,
+                created_at: row.get(11)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -383,6 +415,337 @@ pub async fn save_receipt(app: AppHandle, receipt: Receipt) -> Result<(), String
 }
 
 // ============================================================================
+// Purchased Items Commands
+// ============================================================================
+
+#[tauri::command]
+pub async fn save_purchased_item(app: AppHandle, item: PurchasedItem) -> Result<(), String> {
+    let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "INSERT INTO purchased_items (id, receipt_id, ledger_id, name, quantity, unit, unit_price, total_price, category, brand, purchased_at, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        rusqlite::params![
+            &item.id,
+            &item.receipt_id,
+            &item.ledger_id,
+            &item.name,
+            item.quantity,
+            &item.unit,
+            item.unit_price,
+            item.total_price,
+            &item.category,
+            &item.brand,
+            &item.purchased_at,
+            &item.created_at,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn save_purchased_items(app: AppHandle, items: Vec<PurchasedItem>) -> Result<(), String> {
+    let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
+
+    for item in items {
+        conn.execute(
+            "INSERT INTO purchased_items (id, receipt_id, ledger_id, name, quantity, unit, unit_price, total_price, category, brand, purchased_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                &item.id,
+                &item.receipt_id,
+                &item.ledger_id,
+                &item.name,
+                item.quantity,
+                &item.unit,
+                item.unit_price,
+                item.total_price,
+                &item.category,
+                &item.brand,
+                &item.purchased_at,
+                &item.created_at,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_purchased_items(app: AppHandle, ledger_id: Option<String>) -> Result<Vec<PurchasedItem>, String> {
+    let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
+
+    let query = if ledger_id.is_some() {
+        "SELECT id, receipt_id, ledger_id, name, quantity, unit, unit_price, total_price, category, brand, purchased_at, created_at
+         FROM purchased_items WHERE ledger_id = ?1 ORDER BY purchased_at DESC"
+    } else {
+        "SELECT id, receipt_id, ledger_id, name, quantity, unit, unit_price, total_price, category, brand, purchased_at, created_at
+         FROM purchased_items ORDER BY purchased_at DESC"
+    };
+
+    let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
+
+    let items: Vec<PurchasedItem> = if let Some(ref lid) = ledger_id {
+        stmt.query_map([lid], |row| {
+            Ok(PurchasedItem {
+                id: row.get(0)?,
+                receipt_id: row.get(1)?,
+                ledger_id: row.get(2)?,
+                name: row.get(3)?,
+                quantity: row.get(4)?,
+                unit: row.get(5)?,
+                unit_price: row.get(6)?,
+                total_price: row.get(7)?,
+                category: row.get(8)?,
+                brand: row.get(9)?,
+                purchased_at: row.get(10)?,
+                created_at: row.get(11)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect()
+    } else {
+        stmt.query_map([], |row| {
+            Ok(PurchasedItem {
+                id: row.get(0)?,
+                receipt_id: row.get(1)?,
+                ledger_id: row.get(2)?,
+                name: row.get(3)?,
+                quantity: row.get(4)?,
+                unit: row.get(5)?,
+                unit_price: row.get(6)?,
+                total_price: row.get(7)?,
+                category: row.get(8)?,
+                brand: row.get(9)?,
+                purchased_at: row.get(10)?,
+                created_at: row.get(11)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect()
+    };
+
+    Ok(items)
+}
+
+#[tauri::command]
+pub async fn delete_purchased_item(app: AppHandle, item_id: String) -> Result<(), String> {
+    let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
+
+    conn.execute("DELETE FROM purchased_items WHERE id = ?1", [&item_id])
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+// ============================================================================
+// Conversation Management Commands
+// ============================================================================
+
+/// Start a new conversation session
+#[tauri::command]
+pub async fn start_conversation(app: AppHandle) -> Result<String, String> {
+    let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO conversation_sessions (id, created_at, updated_at) VALUES (?1, ?2, ?2)",
+        [&session_id, &now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Set as current session
+    let mut current = CURRENT_SESSION.lock().map_err(|e| e.to_string())?;
+    *current = Some(session_id.clone());
+
+    log::info!("[CONVERSATION] Started new session: {}", session_id);
+    Ok(session_id)
+}
+
+/// Get or create the current conversation session
+#[tauri::command]
+pub async fn get_or_create_session(app: AppHandle) -> Result<String, String> {
+    // Check if we have a current session
+    {
+        let current = CURRENT_SESSION.lock().map_err(|e| e.to_string())?;
+        if let Some(session_id) = current.as_ref() {
+            return Ok(session_id.clone());
+        }
+    }
+
+    // No current session, create one
+    start_conversation(app).await
+}
+
+/// Clear conversation and start fresh
+#[tauri::command]
+pub async fn clear_conversation(app: AppHandle) -> Result<String, String> {
+    // Clear current session reference
+    {
+        let mut current = CURRENT_SESSION.lock().map_err(|e| e.to_string())?;
+        *current = None;
+    }
+
+    // Start a new session
+    start_conversation(app).await
+}
+
+/// Get conversation history for the current session
+fn get_conversation_history(app: &AppHandle, limit: usize) -> Result<Vec<ConversationMessage>, String> {
+    let session_id = {
+        let current = CURRENT_SESSION.lock().map_err(|e| e.to_string())?;
+        match current.as_ref() {
+            Some(id) => id.clone(),
+            None => return Ok(vec![]),
+        }
+    };
+
+    let conn = database::get_connection(app).map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT role, content FROM conversation_messages
+             WHERE session_id = ?1
+             ORDER BY created_at DESC
+             LIMIT ?2",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let messages: Vec<ConversationMessage> = stmt
+        .query_map(rusqlite::params![&session_id, limit as i64], |row| {
+            Ok(ConversationMessage {
+                role: row.get(0)?,
+                content: row.get(1)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // Reverse to get chronological order
+    Ok(messages.into_iter().rev().collect())
+}
+
+/// Save a message to the conversation history
+fn save_message(app: &AppHandle, role: &str, content: &str) -> Result<(), String> {
+    let session_id = {
+        let current = CURRENT_SESSION.lock().map_err(|e| e.to_string())?;
+        match current.as_ref() {
+            Some(id) => id.clone(),
+            None => return Err("No active conversation session".to_string()),
+        }
+    };
+
+    let conn = database::get_connection(app).map_err(|e| e.to_string())?;
+    let msg_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO conversation_messages (id, session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        [&msg_id, &session_id, role, content, &now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Update session timestamp
+    conn.execute(
+        "UPDATE conversation_sessions SET updated_at = ?1 WHERE id = ?2",
+        [&now, &session_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+// ============================================================================
+// Account Commands
+// ============================================================================
+
+#[tauri::command]
+pub async fn get_all_accounts(app: AppHandle) -> Result<Vec<Account>, String> {
+    let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare("SELECT id, name, account_type, institution, currency, is_default, created_at FROM accounts ORDER BY is_default DESC, name")
+        .map_err(|e| e.to_string())?;
+
+    let accounts = stmt
+        .query_map([], |row| {
+            Ok(Account {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                account_type: row.get(2)?,
+                institution: row.get(3)?,
+                currency: row.get(4)?,
+                is_default: row.get::<_, i32>(5)? == 1,
+                created_at: row.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(accounts)
+}
+
+#[tauri::command]
+pub async fn add_account(
+    app: AppHandle,
+    name: String,
+    account_type: String,
+    institution: Option<String>,
+    currency: String,
+) -> Result<String, String> {
+    let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO accounts (id, name, account_type, institution, currency, is_default, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+        rusqlite::params![&id, &name, &account_type, &institution, &currency, &now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn delete_account(app: AppHandle, account_id: String) -> Result<(), String> {
+    let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
+
+    // Check if it's the default account
+    let is_default: i32 = conn
+        .query_row(
+            "SELECT is_default FROM accounts WHERE id = ?1",
+            [&account_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    if is_default == 1 {
+        return Err("Cannot delete the default account".to_string());
+    }
+
+    // Set ledger entries to use default account
+    conn.execute(
+        "UPDATE ledger SET account_id = 'default' WHERE account_id = ?1",
+        [&account_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Delete the account
+    conn.execute("DELETE FROM accounts WHERE id = ?1", [&account_id])
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+// ============================================================================
 // Query Commands
 // ============================================================================
 
@@ -392,6 +755,16 @@ pub async fn process_query(app: AppHandle, question: String) -> Result<ResponseD
     log::info!("[PIPELINE] Starting query processing");
     log::info!("[PIPELINE] User question: {}", question);
     log::info!("========================================");
+
+    // Ensure we have a conversation session
+    let _ = get_or_create_session(app.clone()).await;
+
+    // Get conversation history (last 10 messages for context)
+    let history = get_conversation_history(&app, 10).unwrap_or_default();
+    log::info!("[PIPELINE] Loaded {} messages from conversation history", history.len());
+
+    // Save the user's message
+    let _ = save_message(&app, "user", &question);
 
     let settings = get_settings(app.clone()).await?;
 
@@ -403,7 +776,7 @@ pub async fn process_query(app: AppHandle, question: String) -> Result<ResponseD
 
     // Step 1: Determine if this is a data query or conversational query
     log::info!("[PIPELINE] Step 1: Analyzing query...");
-    let query_analysis = llm::analyze_query(&provider, &question)
+    let query_analysis = llm::analyze_query(&provider, &question, &history)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -446,9 +819,20 @@ pub async fn process_query(app: AppHandle, question: String) -> Result<ResponseD
 
                 // Step 3: Format the results with the LLM
                 log::info!("[PIPELINE] Step 3: Formatting results with LLM ({} rows)...", row_count);
-                let response = llm::format_query_results(&provider, &question, &data)
+                let response = llm::format_query_results(&provider, &question, &data, &history)
                     .await
                     .map_err(|e| e.to_string())?;
+
+                // Save the assistant's response to conversation history
+                if let Some(first_card) = response.cards.first() {
+                    let response_text = match first_card {
+                        ResponseCard::Text(content) => content.body.clone(),
+                        ResponseCard::Chart(content) => format!("[Chart: {}]", content.title),
+                        ResponseCard::Table(content) => format!("[Table: {}]", content.title),
+                        ResponseCard::Mixed(content) => content.body.clone(),
+                    };
+                    let _ = save_message(&app, "assistant", &response_text);
+                }
 
                 log::info!("[PIPELINE] Final response generated with {} cards", response.cards.len());
                 log::info!("========================================");
@@ -472,9 +856,20 @@ pub async fn process_query(app: AppHandle, question: String) -> Result<ResponseD
     } else {
         // It's a conversational query, respond directly
         log::info!("[PIPELINE] Step 2: Processing as conversational query (no data needed)");
-        let response = llm::process_conversational_query(&provider, &question)
+        let response = llm::process_conversational_query(&provider, &question, &history)
             .await
             .map_err(|e| e.to_string())?;
+
+        // Save the assistant's response to conversation history
+        if let Some(first_card) = response.cards.first() {
+            let response_text = match first_card {
+                ResponseCard::Text(content) => content.body.clone(),
+                ResponseCard::Chart(content) => format!("[Chart: {}]", content.title),
+                ResponseCard::Table(content) => format!("[Table: {}]", content.title),
+                ResponseCard::Mixed(content) => content.body.clone(),
+            };
+            let _ = save_message(&app, "assistant", &response_text);
+        }
 
         log::info!("[PIPELINE] Conversational response generated");
         log::info!("========================================");
@@ -556,6 +951,23 @@ pub async fn parse_receipt_image(
         .ok_or_else(|| "No LLM provider configured".to_string())?;
 
     llm::parse_receipt_with_llm(&provider, &image_path, &categories)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn parse_receipt_text(
+    app: AppHandle,
+    text: String,
+    categories: Vec<String>,
+) -> Result<ParsedReceipt, String> {
+    let settings = get_settings(app).await?;
+
+    let provider = settings
+        .provider
+        .ok_or_else(|| "No LLM provider configured".to_string())?;
+
+    llm::parse_receipt_text_with_llm(&provider, &text, &categories)
         .await
         .map_err(|e| e.to_string())
 }

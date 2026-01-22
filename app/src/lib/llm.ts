@@ -3,6 +3,7 @@ import type {
   ExtractedTransaction,
   ExpenseDetectionResult,
   LLMProvider,
+  ParsedReceiptItem,
 } from "@/types";
 import { isTauri, getTauriInvoke } from "./tauri";
 
@@ -122,15 +123,17 @@ export async function parseDocument(
 }
 
 /**
- * Parse an image (receipt) using vision model.
+ * Parse receipt text with detailed item extraction.
+ * Used for text-based receipts (PDF, TXT, CSV).
+ * Returns items in kebab-case format.
  */
-export async function parseImage(
-  imagePath: string,
+export async function parseReceiptText(
+  text: string,
   categories: string[]
 ): Promise<{
   merchant: string;
   date: string;
-  items: { name: string; amount: number }[];
+  items: ParsedReceiptItem[];
   tax: number | null;
   total: number;
   category: string;
@@ -138,9 +141,9 @@ export async function parseImage(
   const invoke = await getTauriInvoke();
   if (invoke) {
     try {
-      return await invoke("parse_receipt_image", { imagePath, categories });
+      return await invoke("parse_receipt_text", { text, categories });
     } catch (error) {
-      console.error("Parse receipt error:", error);
+      console.error("Parse receipt text error:", error);
       return {
         merchant: "Unknown Store",
         date: new Date().toISOString().split("T")[0],
@@ -154,12 +157,89 @@ export async function parseImage(
 
   // Mock for browser development
   return {
-    merchant: "Unknown Store",
+    merchant: "Sample Store",
     date: new Date().toISOString().split("T")[0],
-    items: [{ name: "Item", amount: 10.0 }],
-    tax: 0.8,
-    total: 10.8,
-    category: "Shopping",
+    items: [
+      {
+        name: "sample-item",
+        quantity: 1,
+        unit: null,
+        unit_price: 5.99,
+        total_price: 5.99,
+        category: "other",
+        brand: null,
+      },
+    ],
+    tax: 0.5,
+    total: 6.49,
+    category: "Other",
+  };
+}
+
+/**
+ * Parse an image (receipt) using vision model.
+ * Returns detailed item information for granular tracking.
+ */
+export async function parseImage(
+  imagePath: string,
+  categories: string[]
+): Promise<{
+  merchant: string;
+  date: string;
+  items: ParsedReceiptItem[];
+  tax: number | null;
+  total: number;
+  category: string;
+}> {
+  console.log("[parseImage] Starting vision parsing for:", imagePath);
+  const invoke = await getTauriInvoke();
+  if (invoke) {
+    try {
+      console.log("[parseImage] Calling parse_receipt_image...");
+      const result = await invoke("parse_receipt_image", { imagePath, categories });
+      console.log("[parseImage] Vision result:", result);
+      return result as {
+        merchant: string;
+        date: string;
+        items: ParsedReceiptItem[];
+        tax: number | null;
+        total: number;
+        category: string;
+      };
+    } catch (error) {
+      console.error("[parseImage] Parse receipt error:", error);
+      // Re-throw to let caller handle it
+      throw error;
+    }
+  }
+
+  // Mock for browser development with detailed items
+  return {
+    merchant: "Sample Grocery Store",
+    date: new Date().toISOString().split("T")[0],
+    items: [
+      {
+        name: "Organic Apples",
+        quantity: 2,
+        unit: "lb",
+        unit_price: 3.99,
+        total_price: 7.98,
+        category: "produce",
+        brand: null,
+      },
+      {
+        name: "Milk",
+        quantity: 1,
+        unit: "gal",
+        unit_price: 4.29,
+        total_price: 4.29,
+        category: "dairy",
+        brand: "Organic Valley",
+      },
+    ],
+    tax: 0.98,
+    total: 13.25,
+    category: "Groceries",
   };
 }
 

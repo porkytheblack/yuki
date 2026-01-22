@@ -3,8 +3,9 @@
 import { useState, useEffect } from "react";
 import { Modal } from "./Modal";
 import { useAppStore } from "@/store/appStore";
+import { ThemeToggle } from "./ThemeToggle";
 import type { LLMProviderType, LLMProvider } from "@/types";
-import { Loader2, Check, AlertCircle } from "lucide-react";
+import { Loader2, Check, AlertCircle, Volume2, VolumeX } from "lucide-react";
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -55,7 +56,7 @@ const PROVIDER_OPTIONS: {
 ];
 
 export function SettingsModal({ onClose }: SettingsModalProps) {
-  const { settings, setProvider } = useAppStore();
+  const { settings, setProvider, setSoundEnabled } = useAppStore();
 
   const [providerType, setProviderType] = useState<LLMProviderType>(
     settings.provider?.type || "anthropic"
@@ -184,6 +185,47 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   return (
     <Modal isOpen={true} onClose={onClose} title="Settings" size="md">
       <div className="space-y-6">
+        {/* Theme Selection */}
+        <div>
+          <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-3">
+            Appearance
+          </label>
+          <ThemeToggle />
+        </div>
+
+        {/* Sound Toggle */}
+        <div>
+          <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-3">
+            Sound
+          </label>
+          <button
+            onClick={() => setSoundEnabled(!settings.soundEnabled)}
+            className={`
+              flex items-center gap-3 w-full px-4 py-3 rounded-lg border transition-colors
+              ${settings.soundEnabled
+                ? "bg-primary-50 dark:bg-primary-900/20 border-primary-200 dark:border-primary-800"
+                : "bg-neutral-50 dark:bg-neutral-800 border-neutral-200 dark:border-neutral-700"
+              }
+            `}
+          >
+            {settings.soundEnabled ? (
+              <Volume2 className="w-5 h-5 text-primary-600 dark:text-primary-400" />
+            ) : (
+              <VolumeX className="w-5 h-5 text-neutral-400" />
+            )}
+            <div className="text-left">
+              <div className="text-sm font-medium text-neutral-800 dark:text-neutral-200">
+                {settings.soundEnabled ? "Sound enabled" : "Sound disabled"}
+              </div>
+              <div className="text-xs text-neutral-500">
+                Yuki says "thank you" when processing documents
+              </div>
+            </div>
+          </button>
+        </div>
+
+        <hr className="border-neutral-200 dark:border-neutral-700" />
+
         {/* Provider Selection */}
         <div>
           <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">

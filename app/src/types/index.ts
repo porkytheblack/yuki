@@ -9,9 +9,20 @@ export interface Document {
   uploaded_at: string;
 }
 
+export interface Account {
+  id: string;
+  name: string;
+  account_type: "checking" | "savings" | "credit" | "cash" | "investment" | "mobile_money" | "other";
+  institution: string | null;
+  currency: string;
+  is_default: boolean;
+  created_at: string;
+}
+
 export interface LedgerEntry {
   id: string;
   document_id: string | null;
+  account_id: string | null;
   date: string;
   description: string;
   amount: number;
@@ -19,7 +30,7 @@ export interface LedgerEntry {
   category_id: string;
   merchant: string | null;
   notes: string | null;
-  source: "document" | "image" | "conversation" | "manual";
+  source: "document" | "image" | "conversation" | "manual" | "scanned-pdf";
   created_at: string;
 }
 
@@ -36,6 +47,31 @@ export interface Receipt {
 export interface ReceiptItem {
   name: string;
   amount: number;
+}
+
+export interface ParsedReceiptItem {
+  name: string;
+  quantity: number | null;
+  unit: string | null;
+  unit_price: number | null;
+  total_price: number;
+  category: string | null;
+  brand: string | null;
+}
+
+export interface PurchasedItem {
+  id: string;
+  receipt_id: string | null;
+  ledger_id: string | null;  // Optional - receipts don't create ledger entries
+  name: string;
+  quantity: number;
+  unit: string | null;
+  unit_price: number | null;
+  total_price: number;
+  category: string | null;
+  brand: string | null;
+  purchased_at: string;
+  created_at: string;
 }
 
 export interface Category {
@@ -139,6 +175,7 @@ export interface Settings {
   provider: LLMProvider | null;
   defaultCurrency: string;
   theme: "light" | "dark" | "system";
+  soundEnabled: boolean;
 }
 
 // Application state types

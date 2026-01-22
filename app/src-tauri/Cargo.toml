@@ -55,9 +55,15 @@ dirs = "5"
 sha2 = "0.10"
 hex = "0.4"
 
+# Base64 encoding for vision API
+base64 = "0.22"
+
 # Error handling
 thiserror = "1"
 anyhow = "1"
+
+# Static initialization
+lazy_static = "1.5"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

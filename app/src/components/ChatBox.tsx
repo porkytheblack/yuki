@@ -71,14 +71,15 @@ export function ChatBox({ disabled = false }: ChatBoxProps) {
         placeholder={disabled ? "Processing document..." : "Ask Yuki here..."}
         className={`
           w-full px-4 py-3 pr-12
-          bg-neutral-0 dark:bg-neutral-800
-          border border-neutral-200 dark:border-neutral-700
-          rounded-lg
-          text-neutral-800 dark:text-neutral-100
-          placeholder:text-neutral-400
-          focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent
+          bg-neutral-50 dark:bg-neutral-800/50
+          border border-dashed border-neutral-300 dark:border-neutral-600
+          rounded-xl
+          text-neutral-900 dark:text-neutral-100
+          placeholder:text-neutral-400 dark:placeholder:text-neutral-500
+          focus:outline-none focus:border-solid focus:border-neutral-400 dark:focus:border-neutral-500
           disabled:opacity-50 disabled:cursor-not-allowed
-          transition-all duration-200
+          transition-all duration-150
+          shadow-md shadow-neutral-200/50 dark:shadow-neutral-900/50
         `}
         aria-label="Ask Yuki a question about your finances"
       />
@@ -88,17 +89,18 @@ export function ChatBox({ disabled = false }: ChatBoxProps) {
         className={`
           absolute right-2 top-1/2 -translate-y-1/2
           p-2 rounded-md
-          text-neutral-500 hover:text-primary-600
-          hover:bg-primary-50 dark:hover:bg-primary-900/20
-          disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent
-          transition-colors duration-200
+          text-neutral-400 dark:text-neutral-500
+          hover:text-neutral-900 dark:hover:text-neutral-100
+          hover:bg-neutral-200/50 dark:hover:bg-neutral-700/50
+          disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent
+          transition-colors duration-150
         `}
         aria-label="Send question"
       >
         {isLoading ? (
-          <Loader2 className="w-5 h-5 animate-spin" />
+          <Loader2 className="w-4 h-4 animate-spin" />
         ) : (
-          <Send className="w-5 h-5" />
+          <Send className="w-4 h-4" />
         )}
       </button>
     </div>
