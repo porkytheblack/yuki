@@ -234,7 +234,7 @@ export default function LandingPage() {
 
             <div className="flex flex-col sm:flex-row gap-4 justify-center items-center mb-8">
               <a
-                href={`${RELEASES_URL}/download/Yuki.dmg`}
+                href={`${RELEASES_URL}`}
                 className="platform-card flex flex-col items-center gap-2"
               >
                 <Apple size={28} className="text-white" />
@@ -243,7 +243,7 @@ export default function LandingPage() {
               </a>
 
               <a
-                href={`${RELEASES_URL}/download/Yuki.msi`}
+                href={`${RELEASES_URL}`}
                 className="platform-card flex flex-col items-center gap-2"
               >
                 <WindowsIcon size={28} />
@@ -252,7 +252,7 @@ export default function LandingPage() {
               </a>
 
               <a
-                href={`${RELEASES_URL}/download/yuki.AppImage`}
+                href={`${RELEASES_URL}`}
                 className="platform-card flex flex-col items-center gap-2"
               >
                 <LinuxIcon size={28} />
