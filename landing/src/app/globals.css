@@ -1,0 +1,187 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  --font-sora: 'Sora', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  --bg-dark: #1a1a1a;
+  --bg-card: #242424;
+  --bg-card-hover: #2a2a2a;
+  --text-primary: #ffffff;
+  --text-secondary: #a0a0a0;
+  --text-muted: #6b6b6b;
+  --accent-peach: #e8a87c;
+  --accent-blue: #7cc8fc;
+  --accent-amber: #f5c77e;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-sora);
+  background: var(--bg-dark);
+  color: var(--text-primary);
+  min-height: 100vh;
+}
+
+/* Subtle grid pattern like Yuki's app */
+.bg-grid {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* Card styles */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  transition: all 0.2s ease;
+}
+
+.card:hover {
+  background: var(--bg-card-hover);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+/* Demo box style (like Miku's) */
+.demo-box {
+  background: var(--bg-card);
+  border: 1px dashed rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  font-family: var(--font-mono);
+}
+
+/* Accent text */
+.text-accent {
+  color: var(--accent-peach);
+}
+
+/* Peach highlight (like Miku's yellow/blue highlights) */
+.highlight-peach {
+  background: rgba(232, 168, 124, 0.2);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.highlight-blue {
+  background: rgba(124, 200, 252, 0.2);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* Button styles */
+.btn-primary {
+  background: var(--accent-peach);
+  color: var(--bg-dark);
+  font-weight: 600;
+  padding: 14px 28px;
+  border-radius: 10px;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.btn-primary:hover {
+  background: #d49568;
+  transform: translateY(-2px);
+}
+
+.btn-secondary {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-weight: 500;
+  padding: 12px 24px;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-secondary:hover {
+  background: var(--bg-card-hover);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+/* Platform download cards */
+.platform-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 24px 32px;
+  text-align: center;
+  transition: all 0.2s ease;
+  min-width: 180px;
+}
+
+.platform-card:hover {
+  background: var(--bg-card-hover);
+  border-color: rgba(255, 255, 255, 0.15);
+  transform: translateY(-2px);
+}
+
+/* Pill badge */
+.pill {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 9999px;
+  padding: 8px 16px;
+  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Section divider */
+.divider {
+  height: 1px;
+  background: var(--border-subtle);
+  width: 100%;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-dark);
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3a3a3a;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4a4a4a;
+}
+
+/* Floating animation */
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+/* Subtle glow for avatar */
+.avatar-glow {
+  box-shadow: 0 0 60px rgba(232, 168, 124, 0.15);
+}
