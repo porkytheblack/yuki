@@ -1,0 +1,63 @@
+[package]
+name = "yuki"
+version = "0.1.0"
+description = "Your Little Helper for Finances - A local-first personal finance tracker"
+authors = ["Yuki"]
+license = "MIT"
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "yuki_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri core
+tauri = { version = "2", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+log = "0.4"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# UUID generation
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# HTTP client for LLM APIs
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# PDF text extraction
+pdf-extract = "0.7"
+
+# File system utilities
+dirs = "5"
+
+# SHA-256 hashing
+sha2 = "0.10"
+hex = "0.4"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
