@@ -1178,6 +1178,25 @@ CREATE TABLE accounts (
     created_at TEXT NOT NULL
 );
 
+-- Currencies table for multi-currency support
+CREATE TABLE currencies (
+    code TEXT PRIMARY KEY,        -- ISO currency code: "USD", "EUR", "KES", "GBP", etc.
+    name TEXT NOT NULL,           -- Display name: "US Dollar", "Euro", "Kenyan Shilling"
+    symbol TEXT NOT NULL,         -- Currency symbol: "$", "€", "KSh", "£"
+    conversion_rate REAL NOT NULL DEFAULT 1.0,  -- Rate to convert TO the primary currency (1.0 for primary)
+    is_primary INTEGER NOT NULL DEFAULT 0,      -- 1 if this is the primary/base currency
+    created_at TEXT NOT NULL
+);
+
+-- Settings table stores user preferences
+CREATE TABLE settings (
+    key TEXT PRIMARY KEY,         -- Setting key
+    value TEXT NOT NULL           -- Setting value
+);
+-- Important settings:
+--   'default_currency' -> The user's default currency code (e.g., "KES", "USD")
+--   'provider' -> JSON object with LLM provider configuration
+
 CREATE TABLE ledger (
     id TEXT PRIMARY KEY,
     document_id TEXT,
@@ -1185,7 +1204,7 @@ CREATE TABLE ledger (
     date TEXT NOT NULL,           -- ISO 8601 format: "2025-10-15"
     description TEXT NOT NULL,
     amount REAL NOT NULL,         -- NEGATIVE for expenses, POSITIVE for income
-    currency TEXT NOT NULL DEFAULT 'USD',
+    currency TEXT NOT NULL DEFAULT 'USD',  -- Currency code for this transaction
     category_id TEXT NOT NULL,    -- References categories.id (lowercase)
     merchant TEXT,
     notes TEXT,
@@ -1230,6 +1249,13 @@ ITEM QUERIES (purchased_items table):
 - Sum quantities: SUM(quantity)
 - Sum spending: SUM(total_price)
 
+CURRENCY HANDLING:
+- Transactions are stored with their original currency in the 'currency' column
+- The primary currency (is_primary=1) is the user's base currency for conversions
+- To convert amounts to primary currency: amount * (SELECT conversion_rate FROM currencies WHERE code = ledger.currency)
+- When aggregating across currencies, convert to primary currency first
+- User's default currency can be found in settings table: SELECT value FROM settings WHERE key = 'default_currency'
+
 Respond with JSON only:
 {
   "needs_data": true/false,
@@ -1242,13 +1268,17 @@ Examples:
 - "how much did I spend on dining?" -> {"needs_data": true, "sql_query": "SELECT SUM(ABS(amount)) as total FROM ledger WHERE category_id = 'dining' AND amount < 0", "query_type": "data_query"}
 - "spending by category" -> {"needs_data": true, "sql_query": "SELECT c.name, SUM(ABS(l.amount)) as total FROM ledger l JOIN categories c ON l.category_id = c.id WHERE l.amount < 0 GROUP BY c.name ORDER BY total DESC", "query_type": "data_query"}
 - "spending this month" or "recent spending" -> {"needs_data": true, "sql_query": "SELECT SUM(ABS(amount)) as total FROM ledger WHERE amount < 0 AND strftime('%Y-%m', date) = (SELECT strftime('%Y-%m', date) FROM ledger ORDER BY date DESC LIMIT 1)", "query_type": "data_query"}
-- "recent transactions" -> {"needs_data": true, "sql_query": "SELECT date, description, amount, category_id, merchant FROM ledger ORDER BY date DESC LIMIT 10", "query_type": "data_query"}
+- "recent transactions" -> {"needs_data": true, "sql_query": "SELECT date, description, amount, currency, category_id, merchant FROM ledger ORDER BY date DESC LIMIT 10", "query_type": "data_query"}
 - "how many apples did I buy last month?" -> {"needs_data": true, "sql_query": "SELECT SUM(quantity) as total_quantity, SUM(total_price) as total_spent FROM purchased_items WHERE name LIKE '%apple%' AND strftime('%Y-%m', purchased_at) = (SELECT strftime('%Y-%m', purchased_at) FROM purchased_items ORDER BY purchased_at DESC LIMIT 1)", "query_type": "data_query"}
 - "how much did I spend on milk?" -> {"needs_data": true, "sql_query": "SELECT SUM(total_price) as total FROM purchased_items WHERE name LIKE '%milk%'", "query_type": "data_query"}
 - "what groceries did I buy recently?" -> {"needs_data": true, "sql_query": "SELECT name, quantity, unit, total_price, purchased_at FROM purchased_items ORDER BY purchased_at DESC LIMIT 20", "query_type": "data_query"}
 - "spending on produce" -> {"needs_data": true, "sql_query": "SELECT SUM(total_price) as total FROM purchased_items WHERE category = 'produce'", "query_type": "data_query"}
 - "most bought items" -> {"needs_data": true, "sql_query": "SELECT name, SUM(quantity) as total_qty, COUNT(*) as times_bought FROM purchased_items GROUP BY name ORDER BY total_qty DESC LIMIT 10", "query_type": "data_query"}
 - "how can I save money?" -> {"needs_data": false, "sql_query": null, "query_type": "advice"}
+- "what currencies do I have?" -> {"needs_data": true, "sql_query": "SELECT code, name, symbol, conversion_rate, is_primary FROM currencies ORDER BY is_primary DESC, name", "query_type": "data_query"}
+- "what is my default currency?" -> {"needs_data": true, "sql_query": "SELECT value as default_currency FROM settings WHERE key = 'default_currency'", "query_type": "data_query"}
+- "spending by currency" -> {"needs_data": true, "sql_query": "SELECT l.currency, c.symbol, SUM(ABS(l.amount)) as total FROM ledger l LEFT JOIN currencies c ON l.currency = c.code WHERE l.amount < 0 GROUP BY l.currency ORDER BY total DESC", "query_type": "data_query"}
+- "total spending in primary currency" -> {"needs_data": true, "sql_query": "SELECT SUM(ABS(l.amount) * COALESCE(c.conversion_rate, 1.0)) as total_in_primary FROM ledger l LEFT JOIN currencies c ON l.currency = c.code WHERE l.amount < 0", "query_type": "data_query"}
 
 Output ONLY valid JSON, no markdown."#;
 
