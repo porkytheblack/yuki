@@ -255,7 +255,12 @@ pub async fn extract_pdf_text(data: Vec<u8>) -> Result<PdfExtractionResult, Stri
 
 #[tauri::command]
 pub async fn save_ledger_entry(app: AppHandle, entry: LedgerEntry) -> Result<(), String> {
-    let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
+    log::info!("[save_ledger_entry] Saving entry: {} - {}", entry.description, entry.amount);
+
+    let conn = database::get_connection(&app).map_err(|e| {
+        log::error!("[save_ledger_entry] Failed to get DB connection: {}", e);
+        e.to_string()
+    })?;
 
     conn.execute(
         "INSERT INTO ledger (id, document_id, account_id, date, description, amount, currency, category_id, merchant, notes, source, created_at)
@@ -275,9 +280,86 @@ pub async fn save_ledger_entry(app: AppHandle, entry: LedgerEntry) -> Result<(),
             &entry.created_at,
         ],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        log::error!("[save_ledger_entry] SQL error: {}", e);
+        e.to_string()
+    })?;
 
+    log::info!("[save_ledger_entry] Entry saved successfully");
     Ok(())
+}
+
+#[tauri::command]
+pub async fn save_ledger_entries_batch(app: AppHandle, entries: Vec<LedgerEntry>) -> Result<usize, String> {
+    log::info!("[save_ledger_entries_batch] Received {} entries to save", entries.len());
+
+    // Log first entry details for debugging
+    if let Some(first) = entries.first() {
+        log::info!("[save_ledger_entries_batch] First entry: id={}, doc_id={:?}, date={}, desc={}, amount={}, currency={}, category={}, source={}",
+            first.id, first.document_id, first.date, first.description, first.amount, first.currency, first.category_id, first.source);
+    }
+
+    if entries.is_empty() {
+        log::warn!("[save_ledger_entries_batch] No entries to save!");
+        return Ok(0);
+    }
+
+    let conn = database::get_connection(&app).map_err(|e| {
+        log::error!("[save_ledger_entries_batch] Failed to get DB connection: {}", e);
+        e.to_string()
+    })?;
+
+    // Verify document exists (foreign key check)
+    if let Some(first) = entries.first() {
+        if let Some(ref doc_id) = first.document_id {
+            let doc_exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM documents WHERE id = ?1)",
+                [doc_id],
+                |row| row.get(0)
+            ).unwrap_or(false);
+            log::info!("[save_ledger_entries_batch] Document {} exists: {}", doc_id, doc_exists);
+        }
+    }
+
+    let mut saved_count = 0;
+    for (idx, entry) in entries.iter().enumerate() {
+        log::debug!("[save_ledger_entries_batch] Saving entry {}/{}: {}", idx + 1, entries.len(), entry.description);
+
+        match conn.execute(
+            "INSERT INTO ledger (id, document_id, account_id, date, description, amount, currency, category_id, merchant, notes, source, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                &entry.id,
+                &entry.document_id,
+                &entry.account_id,
+                &entry.date,
+                &entry.description,
+                entry.amount,
+                &entry.currency,
+                &entry.category_id,
+                &entry.merchant,
+                &entry.notes,
+                &entry.source,
+                &entry.created_at,
+            ],
+        ) {
+            Ok(_) => {
+                saved_count += 1;
+                if saved_count % 10 == 0 {
+                    log::info!("[save_ledger_entries_batch] Progress: saved {}/{}", saved_count, entries.len());
+                }
+            },
+            Err(e) => {
+                log::error!("[save_ledger_entries_batch] FAILED to save entry {}: '{}' - Error: {}",
+                    idx + 1, entry.description, e);
+                log::error!("[save_ledger_entries_batch] Entry details: date={}, amount={}, currency={}, category_id={}",
+                    entry.date, entry.amount, entry.currency, entry.category_id);
+            }
+        }
+    }
+
+    log::info!("[save_ledger_entries_batch] Complete: saved {}/{} entries", saved_count, entries.len());
+    Ok(saved_count)
 }
 
 #[tauri::command]
@@ -746,6 +828,220 @@ pub async fn delete_account(app: AppHandle, account_id: String) -> Result<(), St
 }
 
 // ============================================================================
+// Currency Commands
+// ============================================================================
+
+#[tauri::command]
+pub async fn get_all_currencies(app: AppHandle) -> Result<Vec<Currency>, String> {
+    let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare("SELECT code, name, symbol, conversion_rate, is_primary, created_at FROM currencies ORDER BY is_primary DESC, name")
+        .map_err(|e| e.to_string())?;
+
+    let currencies = stmt
+        .query_map([], |row| {
+            Ok(Currency {
+                code: row.get(0)?,
+                name: row.get(1)?,
+                symbol: row.get(2)?,
+                conversion_rate: row.get(3)?,
+                is_primary: row.get::<_, i32>(4)? == 1,
+                created_at: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(currencies)
+}
+
+#[tauri::command]
+pub async fn add_currency(
+    app: AppHandle,
+    code: String,
+    name: String,
+    symbol: String,
+    conversion_rate: f64,
+) -> Result<Currency, String> {
+    let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO currencies (code, name, symbol, conversion_rate, is_primary, created_at)
+         VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+        rusqlite::params![&code, &name, &symbol, conversion_rate, &now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(Currency {
+        code,
+        name,
+        symbol,
+        conversion_rate,
+        is_primary: false,
+        created_at: now,
+    })
+}
+
+#[tauri::command]
+pub async fn update_currency(
+    app: AppHandle,
+    code: String,
+    name: Option<String>,
+    symbol: Option<String>,
+    conversion_rate: Option<f64>,
+) -> Result<(), String> {
+    let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
+
+    if let Some(n) = name {
+        conn.execute("UPDATE currencies SET name = ?1 WHERE code = ?2", [&n, &code])
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(s) = symbol {
+        conn.execute("UPDATE currencies SET symbol = ?1 WHERE code = ?2", [&s, &code])
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(r) = conversion_rate {
+        conn.execute(
+            "UPDATE currencies SET conversion_rate = ?1 WHERE code = ?2",
+            rusqlite::params![r, &code],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn delete_currency(app: AppHandle, code: String) -> Result<(), String> {
+    let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
+
+    // Check if it's the primary currency
+    let is_primary: i32 = conn
+        .query_row(
+            "SELECT is_primary FROM currencies WHERE code = ?1",
+            [&code],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    if is_primary == 1 {
+        return Err("Cannot delete the primary currency".to_string());
+    }
+
+    // Check if any transactions use this currency
+    let usage_count: i32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ledger WHERE currency = ?1",
+            [&code],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    if usage_count > 0 {
+        return Err(format!("Cannot delete currency '{}' - {} transactions use it", code, usage_count));
+    }
+
+    conn.execute("DELETE FROM currencies WHERE code = ?1", [&code])
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_primary_currency(app: AppHandle, code: String) -> Result<(), String> {
+    let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
+
+    // Get the current primary currency's conversion rate (for potential future use)
+    let _old_primary_rate: f64 = conn
+        .query_row(
+            "SELECT conversion_rate FROM currencies WHERE is_primary = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(1.0);
+
+    // Get the new primary currency's conversion rate
+    let new_primary_rate: f64 = conn
+        .query_row(
+            "SELECT conversion_rate FROM currencies WHERE code = ?1",
+            [&code],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    // Clear all primary flags
+    conn.execute("UPDATE currencies SET is_primary = 0", [])
+        .map_err(|e| e.to_string())?;
+
+    // Set new primary
+    conn.execute("UPDATE currencies SET is_primary = 1, conversion_rate = 1.0 WHERE code = ?1", [&code])
+        .map_err(|e| e.to_string())?;
+
+    // Recalculate all other currencies' conversion rates relative to new primary
+    // new_rate = old_rate / new_primary_rate * old_primary_rate
+    if new_primary_rate > 0.0 {
+        conn.execute(
+            "UPDATE currencies SET conversion_rate = conversion_rate / ?1 WHERE code != ?2",
+            rusqlite::params![new_primary_rate, &code],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    // Also update the default currency setting
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('default_currency', ?1)",
+        [&code],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_default_currency(app: AppHandle) -> Result<String, String> {
+    let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
+
+    let currency: String = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'default_currency'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| "KES".to_string());
+
+    Ok(currency)
+}
+
+#[tauri::command]
+pub async fn set_default_currency(app: AppHandle, code: String) -> Result<(), String> {
+    let conn = database::get_connection(&app).map_err(|e| e.to_string())?;
+
+    // Verify the currency exists
+    let exists: i32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM currencies WHERE code = ?1",
+            [&code],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    if exists == 0 {
+        return Err(format!("Currency '{}' does not exist", code));
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('default_currency', ?1)",
+        [&code],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+// ============================================================================
 // Query Commands
 // ============================================================================
 
@@ -927,15 +1223,27 @@ pub async fn parse_document_text(
     text: String,
     categories: Vec<String>,
 ) -> Result<Vec<ExtractedTransaction>, String> {
+    log::info!("[parse_document_text] ========== COMMAND CALLED ==========");
+    log::info!("[parse_document_text] Text length: {} chars", text.len());
+    log::info!("[parse_document_text] Categories: {:?}", categories);
+
     let settings = get_settings(app).await?;
 
     let provider = settings
         .provider
         .ok_or_else(|| "No LLM provider configured".to_string())?;
 
-    llm::parse_document_with_llm(&provider, &text, &categories)
+    log::info!("[parse_document_text] Using provider: {} ({})", provider.name, provider.provider_type);
+
+    let result = llm::parse_document_with_llm(&provider, &text, &categories)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| {
+            log::error!("[parse_document_text] LLM parsing failed: {}", e);
+            e.to_string()
+        })?;
+
+    log::info!("[parse_document_text] ========== RESULT: {} transactions ==========", result.len());
+    Ok(result)
 }
 
 #[tauri::command]
@@ -953,6 +1261,34 @@ pub async fn parse_receipt_image(
     llm::parse_receipt_with_llm(&provider, &image_path, &categories)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn parse_statement_image(
+    app: AppHandle,
+    image_path: String,
+    categories: Vec<String>,
+) -> Result<Vec<ExtractedTransaction>, String> {
+    log::info!("[parse_statement_image] Starting for: {}", image_path);
+
+    let settings = get_settings(app).await?;
+
+    let provider = settings
+        .provider
+        .ok_or_else(|| "No LLM provider configured".to_string())?;
+
+    log::info!("[parse_statement_image] Calling parse_statement_with_vision_llm...");
+
+    let result = llm::parse_statement_with_vision_llm(&provider, &image_path, &categories)
+        .await
+        .map_err(|e| {
+            log::error!("[parse_statement_image] LLM parsing failed: {}", e);
+            e.to_string()
+        })?;
+
+    log::info!("[parse_statement_image] SUCCESS: Got {} transactions, returning to frontend", result.len());
+
+    Ok(result)
 }
 
 #[tauri::command]

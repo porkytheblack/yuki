@@ -263,9 +263,10 @@ async fn call_anthropic(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("API key required for Anthropic"))?;
 
+    // Use higher max_tokens for document parsing to handle large bank statements
     let mut body = json!({
         "model": provider.model,
-        "max_tokens": 4096,
+        "max_tokens": 16384,
         "messages": [
             {
                 "role": "user",
@@ -323,10 +324,11 @@ async fn call_openai_compatible(
         "content": prompt
     }));
 
+    // Use higher max_tokens for document parsing to handle large bank statements
     let body = json!({
         "model": provider.model,
         "messages": messages,
-        "max_tokens": 4096
+        "max_tokens": 16384
     });
 
     let mut request = client
@@ -554,6 +556,18 @@ pub async fn parse_document_with_llm(
     text: &str,
     categories: &[String],
 ) -> Result<Vec<ExtractedTransaction>> {
+    log::info!("[parse_document_with_llm] ========== STARTING TEXT PARSING ==========");
+    log::info!("[parse_document_with_llm] Text length: {} chars", text.len());
+    log::info!("[parse_document_with_llm] Categories: {:?}", categories);
+
+    // Log a preview of the text (first 500 chars)
+    let text_preview = if text.len() > 500 {
+        format!("{}...", &text[..500])
+    } else {
+        text.to_string()
+    };
+    log::info!("[parse_document_with_llm] Text preview: {}", text_preview);
+
     let categories_str = categories.join(", ");
 
     let system_prompt = format!(
@@ -577,17 +591,57 @@ Rules:
 
     let prompt = format!("Parse transactions from this document:\n\n{}", text);
 
+    log::info!("[parse_document_with_llm] Calling LLM...");
     let response = call_llm(provider, &prompt, Some(&system_prompt)).await?;
 
+    log::info!("[parse_document_with_llm] LLM response length: {} chars", response.len());
+    log::info!("[parse_document_with_llm] LLM response preview: {}",
+        if response.len() > 1000 { format!("{}...", &response[..1000]) } else { response.clone() });
+
+    // Strip markdown code block wrapper if present
+    let cleaned_response = response
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    log::info!("[parse_document_with_llm] Cleaned response length: {} chars", cleaned_response.len());
+
     // Try to parse JSON from response
-    let transactions: Vec<ExtractedTransaction> = serde_json::from_str(&response)
-        .or_else(|_| {
-            // Try to extract JSON from markdown code block
-            let json_start = response.find('[').unwrap_or(0);
-            let json_end = response.rfind(']').map(|i| i + 1).unwrap_or(response.len());
-            serde_json::from_str(&response[json_start..json_end])
+    log::info!("[parse_document_with_llm] Attempting JSON parse...");
+    let transactions: Vec<ExtractedTransaction> = serde_json::from_str(cleaned_response)
+        .or_else(|e| {
+            log::warn!("[parse_document_with_llm] Direct JSON parse failed: {}", e);
+            // Try to extract JSON array from response
+            if let Some(json_start) = cleaned_response.find('[') {
+                if let Some(json_end) = cleaned_response.rfind(']') {
+                    let extracted = &cleaned_response[json_start..=json_end];
+                    log::info!("[parse_document_with_llm] Trying to extract JSON from positions {}-{}", json_start, json_end);
+                    log::info!("[parse_document_with_llm] Extracted JSON (first 500 chars): {}",
+                        if extracted.len() > 500 { format!("{}...", &extracted[..500]) } else { extracted.to_string() });
+                    return serde_json::from_str(extracted);
+                }
+            }
+            Err(e)
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|e| {
+            log::error!("[parse_document_with_llm] JSON parse FAILED: {}", e);
+            // Check if JSON is incomplete (truncated response)
+            if e.to_string().contains("EOF") {
+                log::error!("[parse_document_with_llm] Response appears truncated! LLM may have run out of tokens.");
+                log::error!("[parse_document_with_llm] Last 200 chars: {}",
+                    if cleaned_response.len() > 200 { &cleaned_response[cleaned_response.len()-200..] } else { cleaned_response });
+            } else {
+                log::error!("[parse_document_with_llm] Full response was: {}", cleaned_response);
+            }
+            Vec::new()
+        });
+
+    log::info!("[parse_document_with_llm] ========== RESULT: {} transactions ==========", transactions.len());
+    if !transactions.is_empty() {
+        log::info!("[parse_document_with_llm] First transaction: {:?}", transactions[0]);
+    }
 
     Ok(transactions)
 }
@@ -784,6 +838,258 @@ Output only valid JSON."#,
         });
 
     Ok(receipt)
+}
+
+/// Parse a bank statement image/PDF to extract transactions using vision
+/// For large PDFs, processes page by page to avoid token limits
+pub async fn parse_statement_with_vision_llm(
+    provider: &LLMProvider,
+    image_path: &str,
+    categories: &[String],
+) -> Result<Vec<ExtractedTransaction>> {
+    let is_pdf = image_path.to_lowercase().ends_with(".pdf");
+
+    if is_pdf {
+        // For PDFs, process page by page
+        parse_pdf_statement_chunked(provider, image_path, categories).await
+    } else {
+        // For images, process directly
+        parse_single_page_statement(provider, image_path, categories).await
+    }
+}
+
+/// Process a PDF statement page by page
+async fn parse_pdf_statement_chunked(
+    provider: &LLMProvider,
+    pdf_path: &str,
+    categories: &[String],
+) -> Result<Vec<ExtractedTransaction>> {
+    use lopdf::Document;
+
+    let file_data = std::fs::read(pdf_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read PDF {}: {}", pdf_path, e))?;
+
+    // Load PDF to get page count
+    let doc = Document::load_mem(&file_data)
+        .map_err(|e| anyhow::anyhow!("Failed to parse PDF: {}", e))?;
+
+    let page_count = doc.get_pages().len();
+    log::info!("[parse_pdf_statement_chunked] PDF has {} pages", page_count);
+
+    // For small PDFs (3 pages or less), process all at once
+    if page_count <= 3 {
+        log::info!("[parse_pdf_statement_chunked] Small PDF, processing all pages at once");
+        return parse_single_page_statement(provider, pdf_path, categories).await;
+    }
+
+    // For larger PDFs, process in chunks of 2 pages
+    let mut all_transactions: Vec<ExtractedTransaction> = Vec::new();
+    let chunk_size = 2;
+    let total_chunks = (page_count + chunk_size - 1) / chunk_size;
+
+    log::info!("[parse_pdf_statement_chunked] Processing {} pages in {} chunks", page_count, total_chunks);
+
+    for chunk_idx in 0..total_chunks {
+        let start_page = chunk_idx * chunk_size + 1; // 1-indexed
+        let end_page = std::cmp::min(start_page + chunk_size - 1, page_count);
+
+        log::info!("[parse_pdf_statement_chunked] Processing chunk {}/{}: pages {}-{}",
+            chunk_idx + 1, total_chunks, start_page, end_page);
+
+        // Extract pages for this chunk
+        let chunk_pdf = extract_pdf_pages(&doc, start_page, end_page)?;
+        let base64_data = base64_encode(&chunk_pdf);
+
+        // Parse this chunk
+        let chunk_transactions = parse_statement_chunk(
+            provider,
+            &base64_data,
+            categories,
+            start_page,
+            end_page,
+        ).await?;
+
+        log::info!("[parse_pdf_statement_chunked] Chunk {}: extracted {} transactions",
+            chunk_idx + 1, chunk_transactions.len());
+
+        all_transactions.extend(chunk_transactions);
+    }
+
+    log::info!("[parse_pdf_statement_chunked] Total extracted: {} transactions", all_transactions.len());
+    Ok(all_transactions)
+}
+
+/// Extract specific pages from a PDF document into a new PDF buffer
+fn extract_pdf_pages(doc: &lopdf::Document, start_page: usize, end_page: usize) -> Result<Vec<u8>> {
+    use std::io::Cursor;
+
+    let mut new_doc = doc.clone();
+    let pages: Vec<_> = doc.get_pages().keys().cloned().collect();
+
+    // Remove pages outside our range (in reverse order to maintain indices)
+    for (idx, &page_id) in pages.iter().enumerate().rev() {
+        let page_num = idx + 1; // 1-indexed
+        if page_num < start_page || page_num > end_page {
+            let _ = new_doc.delete_pages(&[page_id]);
+        }
+    }
+
+    // Save to buffer
+    let mut buffer = Cursor::new(Vec::new());
+    new_doc.save_to(&mut buffer)
+        .map_err(|e| anyhow::anyhow!("Failed to save PDF chunk: {}", e))?;
+
+    Ok(buffer.into_inner())
+}
+
+/// Parse a single chunk of pages from a statement
+async fn parse_statement_chunk(
+    provider: &LLMProvider,
+    base64_data: &str,
+    categories: &[String],
+    start_page: usize,
+    end_page: usize,
+) -> Result<Vec<ExtractedTransaction>> {
+    let categories_str = categories.join(", ");
+
+    let system_prompt = format!(
+        r#"You are a bank statement parser. Extract ALL transactions from pages {}-{} of this bank statement.
+
+Output a JSON array of transactions. Each transaction should have:
+- date: ISO 8601 format (YYYY-MM-DD)
+- description: Transaction description (merchant name, payment details, etc.)
+- amount: Negative for expenses/debits (money out), positive for income/credits (money in)
+- currency: Currency code (default USD)
+- category: One of: {}
+- merchant: Merchant name extracted from description, or null
+
+Rules:
+- Extract EVERY transaction row - DO NOT SUMMARIZE OR SKIP ANY
+- Look for columns like "Date", "Description", "Debit", "Credit", "Amount", "Balance"
+- Debits/expenses should be NEGATIVE amounts
+- Credits/income should be POSITIVE amounts
+- If a transaction shows in a "Debit" or "Money Out" column, make it negative
+- If a transaction shows in a "Credit" or "Money In" column, make it positive
+- Parse dates carefully - convert to YYYY-MM-DD format
+- Extract merchant names from transaction descriptions (e.g., "VISA-RAILWAY" → merchant: "Railway")
+- Categorize based on merchant:
+  - Subscriptions: Apple, Claude, GitHub, Vercel, Railway, OpenAI, Pinata, Netflix, Spotify
+  - Transportation: Uber, Lyft, Gas stations
+  - Dining: Restaurants, cafes, food delivery
+  - Shopping: Amazon, retail stores
+  - Utilities: Phone, internet, electricity
+  - Income: Deposits, transfers in, salary
+  - Other: Anything unclear
+
+Output only valid JSON array, no explanations."#,
+        start_page, end_page, categories_str
+    );
+
+    let prompt = format!(
+        "Extract ALL transactions from pages {}-{} of this bank statement. Return a JSON array with EVERY transaction.",
+        start_page, end_page
+    );
+
+    log::info!("[parse_statement_chunk] Calling LLM for pages {}-{}...", start_page, end_page);
+
+    let response = call_llm_with_vision(
+        provider,
+        &prompt,
+        base64_data,
+        "application/pdf",
+        Some(&system_prompt),
+    ).await?;
+
+    log::info!("[parse_statement_chunk] Got LLM response, length: {} chars", response.len());
+    log::debug!("[parse_statement_chunk] Response preview: {}...", &response[..std::cmp::min(500, response.len())]);
+
+    // Parse JSON from response
+    log::info!("[parse_statement_chunk] Parsing JSON...");
+    let transactions: Vec<ExtractedTransaction> = serde_json::from_str(&response)
+        .or_else(|e| {
+            log::warn!("[parse_statement_chunk] Direct JSON parse failed: {}, trying to extract array", e);
+            let json_start = response.find('[').unwrap_or(0);
+            let json_end = response.rfind(']').map(|i| i + 1).unwrap_or(response.len());
+            log::info!("[parse_statement_chunk] Extracting JSON from positions {}-{}", json_start, json_end);
+            serde_json::from_str(&response[json_start..json_end])
+        })
+        .unwrap_or_else(|e| {
+            log::error!("[parse_statement_chunk] JSON parse FAILED completely: {}", e);
+            Vec::new()
+        });
+
+    log::info!("[parse_statement_chunk] Parsed {} transactions from chunk", transactions.len());
+    Ok(transactions)
+}
+
+/// Parse a single page/image statement (non-chunked)
+async fn parse_single_page_statement(
+    provider: &LLMProvider,
+    image_path: &str,
+    categories: &[String],
+) -> Result<Vec<ExtractedTransaction>> {
+    let categories_str = categories.join(", ");
+
+    let file_data = std::fs::read(image_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read file {}: {}", image_path, e))?;
+    let base64_data = base64_encode(&file_data);
+
+    let media_type = if image_path.to_lowercase().ends_with(".pdf") {
+        "application/pdf"
+    } else if image_path.to_lowercase().ends_with(".png") {
+        "image/png"
+    } else if image_path.to_lowercase().ends_with(".jpg") || image_path.to_lowercase().ends_with(".jpeg") {
+        "image/jpeg"
+    } else if image_path.to_lowercase().ends_with(".webp") {
+        "image/webp"
+    } else {
+        "image/jpeg"
+    };
+
+    log::info!("[parse_single_page_statement] File: {} ({}), size: {} bytes", image_path, media_type, file_data.len());
+
+    let system_prompt = format!(
+        r#"You are a bank statement parser. Extract ALL transactions from this bank statement.
+
+Output a JSON array of transactions. Each transaction should have:
+- date: ISO 8601 format (YYYY-MM-DD)
+- description: Transaction description (merchant name, payment details, etc.)
+- amount: Negative for expenses/debits (money out), positive for income/credits (money in)
+- currency: Currency code (default USD)
+- category: One of: {}
+- merchant: Merchant name extracted from description, or null
+
+Rules:
+- Extract EVERY transaction row - DO NOT SUMMARIZE
+- Look for columns like "Date", "Description", "Debit", "Credit", "Amount", "Balance"
+- Debits/expenses should be NEGATIVE amounts
+- Credits/income should be POSITIVE amounts
+- Parse dates carefully - convert to YYYY-MM-DD format
+- Extract merchant names from descriptions
+- CRITICAL: Include ALL transactions
+
+Output only valid JSON array, no explanations."#,
+        categories_str
+    );
+
+    let response = call_llm_with_vision(
+        provider,
+        "Extract all transactions from this bank statement. Return a JSON array with every transaction.",
+        &base64_data,
+        media_type,
+        Some(&system_prompt),
+    ).await?;
+
+    let transactions: Vec<ExtractedTransaction> = serde_json::from_str(&response)
+        .or_else(|_| {
+            let json_start = response.find('[').unwrap_or(0);
+            let json_end = response.rfind(']').map(|i| i + 1).unwrap_or(response.len());
+            serde_json::from_str(&response[json_start..json_end])
+        })
+        .unwrap_or_default();
+
+    log::info!("[parse_single_page_statement] Extracted {} transactions", transactions.len());
+    Ok(transactions)
 }
 
 /// Detect expense from conversational message

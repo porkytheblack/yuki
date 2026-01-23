@@ -119,6 +119,21 @@ pub struct ChatHistoryEntry {
     pub created_at: String,
 }
 
+// Currency model
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Currency {
+    pub code: String,
+    pub name: String,
+    pub symbol: String,
+    #[serde(rename = "conversionRate")]
+    pub conversion_rate: f64,
+    #[serde(rename = "isPrimary")]
+    pub is_primary: bool,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+}
+
 // Settings models
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

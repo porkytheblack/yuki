@@ -47,6 +47,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 
 # PDF text extraction
 pdf-extract = "0.7"
+lopdf = "0.34"
 
 # File system utilities
 dirs = "5"

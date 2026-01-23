@@ -190,6 +190,19 @@ pub async fn init_database(app: &AppHandle) -> Result<()> {
         [],
     )?;
 
+    // Create currencies table
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS currencies (
+            code TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            conversion_rate REAL NOT NULL DEFAULT 1.0,
+            is_primary INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )",
+        [],
+    )?;
+
     // Insert default categories if they don't exist
     let default_categories = vec![
         ("income", "Income", "#22c55e"),
@@ -220,16 +233,41 @@ pub async fn init_database(app: &AppHandle) -> Result<()> {
     // Insert default account if none exists
     conn.execute(
         "INSERT OR IGNORE INTO accounts (id, name, account_type, institution, currency, is_default, created_at)
-         VALUES ('default', 'Main Account', 'checking', NULL, 'USD', 1, ?1)",
+         VALUES ('default', 'Main Account', 'checking', NULL, 'KES', 1, ?1)",
         [&now],
+    )?;
+
+    // Insert default currencies if they don't exist
+    let default_currencies = vec![
+        ("KES", "Kenyan Shilling", "KSh", 1.0, true),  // Primary currency
+        ("USD", "US Dollar", "$", 0.0077, false),      // ~1 USD = 130 KES
+        ("EUR", "Euro", "€", 0.0071, false),           // ~1 EUR = 140 KES
+        ("GBP", "British Pound", "£", 0.0061, false),  // ~1 GBP = 164 KES
+    ];
+
+    for (code, name, symbol, rate, is_primary) in default_currencies {
+        conn.execute(
+            "INSERT OR IGNORE INTO currencies (code, name, symbol, conversion_rate, is_primary, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![code, name, symbol, rate, is_primary as i32, &now],
+        )?;
+    }
+
+    // Set default currency in settings if not set
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('default_currency', 'KES')",
+        [],
     )?;
 
     log::info!("Database initialized at {:?}", db_path);
     Ok(())
 }
 
-/// Get a database connection
+/// Get a database connection with busy timeout for handling concurrent writes
 pub fn get_connection(app: &AppHandle) -> Result<Connection> {
     let db_path = get_db_path(app)?;
-    Ok(Connection::open(db_path)?)
+    let conn = Connection::open(db_path)?;
+    // Set busy timeout to 30 seconds to handle concurrent writes
+    conn.busy_timeout(std::time::Duration::from_secs(30))?;
+    Ok(conn)
 }

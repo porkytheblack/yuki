@@ -13,19 +13,32 @@ import {
   Wallet,
   Filter,
   ShoppingCart,
+  Coins,
+  Star,
+  Check,
+  Pencil,
 } from "lucide-react";
 import { ChartCardContent } from "./cards/ChartCardContent";
 import { AddEntryModal, type EntryFormData } from "./AddEntryModal";
 import { AccountsModal } from "./AccountsModal";
 import { TransactionTableSkeleton, DocumentListSkeleton, ChartSkeleton } from "./Skeleton";
 import { useToast } from "@/store/toastStore";
-import type { LedgerEntry, Document, Category, ChartContent, Account, PurchasedItem } from "@/types";
+import type { LedgerEntry, Document, Category, ChartContent, Account, PurchasedItem, Currency } from "@/types";
+import {
+  getAllCurrencies,
+  addCurrency,
+  updateCurrency,
+  deleteCurrency,
+  setPrimaryCurrency,
+  getDefaultCurrency,
+  setDefaultCurrency,
+} from "@/lib/currency";
 
 interface LedgerModalProps {
   onClose: () => void;
 }
 
-type Tab = "transactions" | "items" | "charts" | "sources" | "accounts";
+type Tab = "transactions" | "items" | "charts" | "sources" | "accounts" | "currencies";
 type SortField = "date" | "amount" | "category" | "merchant";
 type SortDirection = "asc" | "desc";
 type ItemSortField = "purchased_at" | "name" | "quantity" | "total_price" | "category";
@@ -49,6 +62,15 @@ export function LedgerModal({ onClose }: LedgerModalProps) {
   const [itemSortField, setItemSortField] = useState<ItemSortField>("purchased_at");
   const [itemSortDirection, setItemSortDirection] = useState<SortDirection>("desc");
 
+  // Currency state
+  const [currencies, setCurrencies] = useState<Currency[]>([]);
+  const [defaultCurrencyCode, setDefaultCurrencyCode] = useState<string>("");
+  const [editingCurrency, setEditingCurrency] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState({ name: "", symbol: "", conversionRate: "" });
+  const [showAddCurrency, setShowAddCurrency] = useState(false);
+  const [newCurrencyForm, setNewCurrencyForm] = useState({ code: "", name: "", symbol: "", conversionRate: "1.0" });
+  const [isSavingCurrency, setIsSavingCurrency] = useState(false);
+
   const toast = useToast();
 
   // Load data on mount
@@ -61,18 +83,22 @@ export function LedgerModal({ onClose }: LedgerModalProps) {
     try {
       if (typeof window !== "undefined" && "__TAURI__" in window) {
         const { invoke } = await import("@tauri-apps/api/core");
-        const [txns, docs, cats, accts, items] = await Promise.all([
+        const [txns, docs, cats, accts, items, currencyList, defaultCurr] = await Promise.all([
           invoke<LedgerEntry[]>("get_all_transactions"),
           invoke<Document[]>("get_all_documents"),
           invoke<Category[]>("get_all_categories"),
           invoke<Account[]>("get_all_accounts"),
           invoke<PurchasedItem[]>("get_purchased_items", { ledgerId: null }),
+          getAllCurrencies(),
+          getDefaultCurrency(),
         ]);
         setTransactions(txns);
         setDocuments(docs);
         setCategories(cats);
         setAccounts(accts);
         setPurchasedItems(items);
+        setCurrencies(currencyList);
+        setDefaultCurrencyCode(defaultCurr);
       } else {
         // Mock data for browser development
         setTransactions([
@@ -147,6 +173,12 @@ export function LedgerModal({ onClose }: LedgerModalProps) {
           { id: "item2", receipt_id: null, ledger_id: "2", name: "Milk", quantity: 1, unit: "gal", unit_price: 4.29, total_price: 4.29, category: "dairy", brand: "Organic Valley", purchased_at: "2025-01-14", created_at: "2025-01-14T15:00:00Z" },
           { id: "item3", receipt_id: null, ledger_id: "2", name: "Bread", quantity: 1, unit: "loaf", unit_price: 3.49, total_price: 3.49, category: "bakery", brand: "Dave's Killer", purchased_at: "2025-01-14", created_at: "2025-01-14T15:00:00Z" },
         ]);
+        setCurrencies([
+          { code: "KES", name: "Kenyan Shilling", symbol: "KSh", conversionRate: 1.0, isPrimary: true, createdAt: "2025-01-01T00:00:00Z" },
+          { code: "USD", name: "US Dollar", symbol: "$", conversionRate: 0.0077, isPrimary: false, createdAt: "2025-01-01T00:00:00Z" },
+          { code: "EUR", name: "Euro", symbol: "€", conversionRate: 0.0071, isPrimary: false, createdAt: "2025-01-01T00:00:00Z" },
+        ]);
+        setDefaultCurrencyCode("KES");
       }
     } catch (err) {
       console.error("Failed to load ledger data:", err);
@@ -374,12 +406,117 @@ export function LedgerModal({ onClose }: LedgerModalProps) {
     toast.success("Items exported successfully");
   };
 
+  // Currency handlers
+  const startEditCurrency = (currency: Currency) => {
+    setEditingCurrency(currency.code);
+    setEditForm({
+      name: currency.name,
+      symbol: currency.symbol,
+      conversionRate: currency.conversionRate.toString(),
+    });
+  };
+
+  const cancelEditCurrency = () => {
+    setEditingCurrency(null);
+    setEditForm({ name: "", symbol: "", conversionRate: "" });
+  };
+
+  const saveEditCurrency = async (code: string) => {
+    setIsSavingCurrency(true);
+    try {
+      await updateCurrency(code, {
+        name: editForm.name,
+        symbol: editForm.symbol,
+        conversionRate: parseFloat(editForm.conversionRate),
+      });
+      setCurrencies(currencies.map(c =>
+        c.code === code
+          ? { ...c, name: editForm.name, symbol: editForm.symbol, conversionRate: parseFloat(editForm.conversionRate) }
+          : c
+      ));
+      setEditingCurrency(null);
+      toast.success("Currency updated");
+    } catch (err) {
+      console.error("Failed to update currency:", err);
+      toast.error("Failed to update currency");
+    } finally {
+      setIsSavingCurrency(false);
+    }
+  };
+
+  const handleDeleteCurrency = async (code: string) => {
+    const currency = currencies.find(c => c.code === code);
+    if (currency?.isPrimary) {
+      toast.error("Cannot delete the primary currency");
+      return;
+    }
+    if (!confirm(`Delete ${code}? This cannot be undone.`)) {
+      return;
+    }
+    try {
+      await deleteCurrency(code);
+      setCurrencies(currencies.filter(c => c.code !== code));
+      toast.success("Currency deleted");
+    } catch (err) {
+      console.error("Failed to delete currency:", err);
+      toast.error("Failed to delete currency");
+    }
+  };
+
+  const handleSetPrimary = async (code: string) => {
+    try {
+      await setPrimaryCurrency(code);
+      setCurrencies(currencies.map(c => ({ ...c, isPrimary: c.code === code })));
+      toast.success(`${code} is now the primary currency`);
+    } catch (err) {
+      console.error("Failed to set primary currency:", err);
+      toast.error("Failed to set primary currency");
+    }
+  };
+
+  const handleSetDefault = async (code: string) => {
+    try {
+      await setDefaultCurrency(code);
+      setDefaultCurrencyCode(code);
+      toast.success(`${code} is now the default for new documents`);
+    } catch (err) {
+      console.error("Failed to set default currency:", err);
+      toast.error("Failed to set default currency");
+    }
+  };
+
+  const handleAddCurrency = async () => {
+    if (!newCurrencyForm.code || !newCurrencyForm.name || !newCurrencyForm.symbol) {
+      toast.error("Please fill in all fields");
+      return;
+    }
+    setIsSavingCurrency(true);
+    try {
+      const newCurrency = await addCurrency(
+        newCurrencyForm.code.toUpperCase(),
+        newCurrencyForm.name,
+        newCurrencyForm.symbol,
+        parseFloat(newCurrencyForm.conversionRate) || 1.0
+      );
+      setCurrencies([...currencies, newCurrency]);
+      setNewCurrencyForm({ code: "", name: "", symbol: "", conversionRate: "1.0" });
+      setShowAddCurrency(false);
+      toast.success("Currency added");
+    } catch (err) {
+      console.error("Failed to add currency:", err);
+      toast.error("Failed to add currency");
+    } finally {
+      setIsSavingCurrency(false);
+    }
+  };
+
   const tabs: { id: Tab; label: string }[] = [
     { id: "transactions", label: "Transactions" },
     { id: "items", label: "Items" },
     { id: "charts", label: "Charts" },
     { id: "sources", label: "Sources" },
     { id: "accounts", label: "Accounts" },
+    { id: "currencies", label: "Currencies" },
   ];
 
   return (
@@ -771,6 +908,239 @@ export function LedgerModal({ onClose }: LedgerModalProps) {
               <Plus className="w-4 h-4" />
               Manage Accounts
             </button>
+          </div>
+        )}
+
+        {/* Currencies Tab */}
+        {activeTab === "currencies" && (
+          <div className="space-y-4">
+            {isLoading ? (
+              <DocumentListSkeleton />
+            ) : (
+              <>
+                {/* Primary currency info */}
+                <div className="p-3 bg-primary-50 dark:bg-primary-900/20 rounded-lg text-sm">
+                  <p className="text-primary-700 dark:text-primary-300">
+                    <strong>Primary currency:</strong> {currencies.find(c => c.isPrimary)?.code || "Not set"}.
+                    All conversion rates are relative to the primary currency.
+                  </p>
+                </div>
+
+                {/* Currency list */}
+                <div className="space-y-2">
+                  {currencies.map((currency) => (
+                    <div
+                      key={currency.code}
+                      className="p-4 bg-neutral-50 dark:bg-neutral-800 rounded-lg"
+                    >
+                      {editingCurrency === currency.code ? (
+                        // Edit mode
+                        <div className="space-y-3">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-lg text-neutral-800 dark:text-neutral-200">
+                              {currency.code}
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-3 gap-3">
+                            <div>
+                              <label className="block text-xs text-neutral-500 mb-1">Name</label>
+                              <input
+                                type="text"
+                                value={editForm.name}
+                                onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                                className="w-full px-2 py-1.5 text-sm bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-600 rounded focus:outline-none focus:ring-2 focus:ring-primary-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-neutral-500 mb-1">Symbol</label>
+                              <input
+                                type="text"
+                                value={editForm.symbol}
+                                onChange={(e) => setEditForm({ ...editForm, symbol: e.target.value })}
+                                className="w-full px-2 py-1.5 text-sm bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-600 rounded focus:outline-none focus:ring-2 focus:ring-primary-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-neutral-500 mb-1">Rate to Primary</label>
+                              <input
+                                type="number"
+                                step="any"
+                                value={editForm.conversionRate}
+                                onChange={(e) => setEditForm({ ...editForm, conversionRate: e.target.value })}
+                                disabled={currency.isPrimary}
+                                className="w-full px-2 py-1.5 text-sm bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-600 rounded focus:outline-none focus:ring-2 focus:ring-primary-500 disabled:opacity-50"
+                              />
+                            </div>
+                          </div>
+                          <div className="flex justify-end gap-2">
+                            <button
+                              onClick={cancelEditCurrency}
+                              className="px-3 py-1.5 text-sm text-neutral-600 dark:text-neutral-400 hover:bg-neutral-200 dark:hover:bg-neutral-700 rounded transition-colors"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={() => saveEditCurrency(currency.code)}
+                              disabled={isSavingCurrency}
+                              className="px-3 py-1.5 text-sm bg-primary-600 hover:bg-primary-700 text-white rounded transition-colors disabled:opacity-50"
+                            >
+                              {isSavingCurrency ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save"}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        // View mode
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-full bg-primary-100 dark:bg-primary-900/30 flex items-center justify-center text-primary-600 dark:text-primary-400">
+                              <Coins className="w-5 h-5" />
+                            </div>
+                            <div>
+                              <div className="font-medium text-neutral-800 dark:text-neutral-200 flex items-center gap-2">
+                                <span className="font-bold">{currency.symbol}</span> {currency.code}
+                                {currency.isPrimary && (
+                                  <span className="text-xs px-2 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 rounded flex items-center gap-1">
+                                    <Star className="w-3 h-3" /> Primary
+                                  </span>
+                                )}
+                                {currency.code === defaultCurrencyCode && (
+                                  <span className="text-xs px-2 py-0.5 bg-primary-100 dark:bg-primary-900/30 text-primary-600 dark:text-primary-400 rounded">
+                                    Default
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-sm text-neutral-500">
+                                {currency.name}
+                                {!currency.isPrimary && (
+                                  <span className="ml-2">
+                                    • 1 {currencies.find(c => c.isPrimary)?.code} = {(1 / currency.conversionRate).toFixed(4)} {currency.code}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            {!currency.isPrimary && (
+                              <button
+                                onClick={() => handleSetPrimary(currency.code)}
+                                className="p-2 text-neutral-400 hover:text-amber-500 transition-colors"
+                                title="Set as primary currency"
+                              >
+                                <Star className="w-4 h-4" />
+                              </button>
+                            )}
+                            {currency.code !== defaultCurrencyCode && (
+                              <button
+                                onClick={() => handleSetDefault(currency.code)}
+                                className="p-2 text-neutral-400 hover:text-primary-500 transition-colors"
+                                title="Set as default for new documents"
+                              >
+                                <Check className="w-4 h-4" />
+                              </button>
+                            )}
+                            <button
+                              onClick={() => startEditCurrency(currency)}
+                              className="p-2 text-neutral-400 hover:text-primary-500 transition-colors"
+                              title="Edit currency"
+                            >
+                              <Pencil className="w-4 h-4" />
+                            </button>
+                            {!currency.isPrimary && (
+                              <button
+                                onClick={() => handleDeleteCurrency(currency.code)}
+                                className="p-2 text-neutral-400 hover:text-error transition-colors"
+                                title="Delete currency"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {/* Add new currency form */}
+                {showAddCurrency ? (
+                  <div className="p-4 bg-neutral-50 dark:bg-neutral-800 rounded-lg space-y-3">
+                    <div className="font-medium text-neutral-800 dark:text-neutral-200">Add New Currency</div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Code (e.g., USD)</label>
+                        <input
+                          type="text"
+                          value={newCurrencyForm.code}
+                          onChange={(e) => setNewCurrencyForm({ ...newCurrencyForm, code: e.target.value.toUpperCase() })}
+                          maxLength={3}
+                          className="w-full px-2 py-1.5 text-sm bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-600 rounded focus:outline-none focus:ring-2 focus:ring-primary-500"
+                          placeholder="USD"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Symbol</label>
+                        <input
+                          type="text"
+                          value={newCurrencyForm.symbol}
+                          onChange={(e) => setNewCurrencyForm({ ...newCurrencyForm, symbol: e.target.value })}
+                          className="w-full px-2 py-1.5 text-sm bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-600 rounded focus:outline-none focus:ring-2 focus:ring-primary-500"
+                          placeholder="$"
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <label className="block text-xs text-neutral-500 mb-1">Name</label>
+                        <input
+                          type="text"
+                          value={newCurrencyForm.name}
+                          onChange={(e) => setNewCurrencyForm({ ...newCurrencyForm, name: e.target.value })}
+                          className="w-full px-2 py-1.5 text-sm bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-600 rounded focus:outline-none focus:ring-2 focus:ring-primary-500"
+                          placeholder="US Dollar"
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <label className="block text-xs text-neutral-500 mb-1">
+                          Conversion Rate (how many {currencies.find(c => c.isPrimary)?.code || "primary"} = 1 of this currency)
+                        </label>
+                        <input
+                          type="number"
+                          step="any"
+                          value={newCurrencyForm.conversionRate}
+                          onChange={(e) => setNewCurrencyForm({ ...newCurrencyForm, conversionRate: e.target.value })}
+                          className="w-full px-2 py-1.5 text-sm bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-600 rounded focus:outline-none focus:ring-2 focus:ring-primary-500"
+                          placeholder="1.0"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex justify-end gap-2">
+                      <button
+                        onClick={() => {
+                          setShowAddCurrency(false);
+                          setNewCurrencyForm({ code: "", name: "", symbol: "", conversionRate: "1.0" });
+                        }}
+                        className="px-3 py-1.5 text-sm text-neutral-600 dark:text-neutral-400 hover:bg-neutral-200 dark:hover:bg-neutral-700 rounded transition-colors"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleAddCurrency}
+                        disabled={isSavingCurrency}
+                        className="px-3 py-1.5 text-sm bg-primary-600 hover:bg-primary-700 text-white rounded transition-colors disabled:opacity-50"
+                      >
+                        {isSavingCurrency ? <Loader2 className="w-4 h-4 animate-spin" /> : "Add Currency"}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setShowAddCurrency(true)}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-3 border-2 border-dashed border-neutral-300 dark:border-neutral-600 hover:border-primary-500 dark:hover:border-primary-500 rounded-lg text-sm font-medium text-neutral-600 dark:text-neutral-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Add Currency
+                  </button>
+                )}
+              </>
+            )}
           </div>
         )}
       </Modal>

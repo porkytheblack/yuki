@@ -6,7 +6,11 @@ mod models;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_log::Builder::default().build())
+        .plugin(
+            tauri_plugin_log::Builder::default()
+                .level(log::LevelFilter::Info)
+                .build()
+        )
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -34,6 +38,7 @@ pub fn run() {
             commands::extract_pdf_text,
             // Ledger commands
             commands::save_ledger_entry,
+            commands::save_ledger_entries_batch,
             commands::get_all_transactions,
             commands::delete_transaction,
             // Category commands
@@ -55,11 +60,20 @@ pub fn run() {
             commands::get_all_accounts,
             commands::add_account,
             commands::delete_account,
+            // Currency commands
+            commands::get_all_currencies,
+            commands::add_currency,
+            commands::update_currency,
+            commands::delete_currency,
+            commands::set_primary_currency,
+            commands::get_default_currency,
+            commands::set_default_currency,
             // Query commands
             commands::process_query,
             commands::parse_document_text,
             commands::parse_receipt_text,
             commands::parse_receipt_image,
+            commands::parse_statement_image,
             commands::detect_expense,
         ])
         .run(tauri::generate_context!())

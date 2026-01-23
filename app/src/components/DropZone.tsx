@@ -66,24 +66,24 @@ export function DropZone({ children }: DropZoneProps) {
   }, [currentFileIndex]);
 
   // Handle when user selects document type
-  const handleTypeSelect = useCallback(async (documentType: DocumentType) => {
-    console.log("[DropZone] handleTypeSelect called with:", documentType);
+  const handleTypeSelect = useCallback(async (documentType: DocumentType, currency?: string) => {
+    console.log("[DropZone] handleTypeSelect called with:", documentType, "currency:", currency);
     const currentFile = pendingFilesRef.current[currentFileIndexRef.current];
     if (!currentFile) {
       console.log("[DropZone] No current file, returning");
       return;
     }
 
-    console.log("[DropZone] Processing file:", currentFile.filename, "as", documentType);
+    console.log("[DropZone] Processing file:", currentFile.filename, "as", documentType, "currency:", currency);
     setShowTypeModal(false);
 
-    // Process this file with the selected type
+    // Process this file with the selected type and currency
     const file = new File([currentFile.contents], currentFile.filename, { type: currentFile.mimeType });
 
     try {
       setProcessingMessage(`Processing ${currentFile.filename}...`);
       console.log("[DropZone] Calling processFile...");
-      const result = await processFile(file, documentType);
+      const result = await processFile(file, documentType, currency);
       console.log("[DropZone] processFile returned:", result);
 
       // Show success and play sound

@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from "uuid";
-import { parseDocument, parseImage, parseReceiptText } from "./llm";
+import { parseDocument, parseImage, parseReceiptText, parseStatementImage } from "./llm";
 import { getTauriInvoke } from "./tauri";
 import type { Document, LedgerEntry, ExtractedTransaction, PurchasedItem } from "@/types";
 
@@ -22,10 +22,11 @@ const SUPPORTED_IMAGE_TYPES = [
  * Process an uploaded file - determine type and route to appropriate handler.
  * @param file The file to process
  * @param documentType Whether this is a "statement" (adds to ledger) or "receipt" (items only)
+ * @param currency The currency code for the transactions (defaults to system default)
  * Returns a summary of what was processed.
  */
-export async function processFile(file: File, documentType: DocumentType): Promise<ProcessingResult> {
-  console.log("[processFile] Starting to process:", file.name, "type:", file.type, "documentType:", documentType);
+export async function processFile(file: File, documentType: DocumentType, currency?: string): Promise<ProcessingResult> {
+  console.log("[processFile] Starting to process:", file.name, "type:", file.type, "documentType:", documentType, "currency:", currency);
   const fileType = file.type || getMimeTypeFromExtension(file.name);
 
   if (SUPPORTED_DOCUMENT_TYPES.includes(fileType)) {
@@ -36,7 +37,7 @@ export async function processFile(file: File, documentType: DocumentType): Promi
       return result;
     } else {
       // Statement - extract transactions to ledger
-      const result = await processDocument(file);
+      const result = await processDocument(file, currency);
       console.log("[processFile] Document processing complete:", result);
       return result;
     }
@@ -48,7 +49,7 @@ export async function processFile(file: File, documentType: DocumentType): Promi
       return result;
     } else {
       // Image as statement - still add to ledger (rare case)
-      const result = await processImageAsStatement(file);
+      const result = await processImageAsStatement(file, currency);
       console.log("[processFile] Image (statement) processing complete:", result);
       return result;
     }
@@ -67,11 +68,92 @@ export interface ProcessingResult {
 }
 
 /**
+ * Save multiple ledger entries in a batch (more efficient for large documents).
+ * Uses a single DB connection to avoid locking issues.
+ */
+async function saveLedgerEntriesBatch(
+  transactions: ExtractedTransaction[],
+  documentId: string,
+  currencyOverride?: string
+): Promise<number> {
+  console.log("[saveLedgerEntriesBatch] Preparing", transactions.length, "entries for batch save");
+  console.log("[saveLedgerEntriesBatch] Document ID:", documentId);
+  console.log("[saveLedgerEntriesBatch] Currency override:", currencyOverride);
+
+  if (transactions.length === 0) {
+    console.warn("[saveLedgerEntriesBatch] No transactions to save!");
+    return 0;
+  }
+
+  // Log first transaction for debugging
+  console.log("[saveLedgerEntriesBatch] First transaction:", JSON.stringify(transactions[0]));
+
+  // Convert all transactions to LedgerEntry format
+  const entries: LedgerEntry[] = transactions.map((txn, idx) => {
+    const categoryId = (txn.category || "other").toLowerCase().replace(/\s+/g, '-');
+    const entry = {
+      id: uuidv4(),
+      document_id: documentId,
+      account_id: "default",
+      date: txn.date || new Date().toISOString().split('T')[0],
+      description: txn.description || "Unknown transaction",
+      amount: typeof txn.amount === 'number' ? txn.amount : 0,
+      currency: currencyOverride || txn.currency || "KES",
+      category_id: categoryId,
+      merchant: txn.merchant || null,
+      notes: null,
+      source: "document" as const,
+      created_at: new Date().toISOString(),
+    };
+    if (idx === 0) {
+      console.log("[saveLedgerEntriesBatch] First entry after conversion:", JSON.stringify(entry));
+    }
+    return entry;
+  });
+
+  console.log("[saveLedgerEntriesBatch] Converted", entries.length, "entries");
+
+  const invoke = await getTauriInvoke();
+  if (invoke) {
+    console.log("[saveLedgerEntriesBatch] Invoking save_ledger_entries_batch with", entries.length, "entries...");
+    try {
+      const savedCount = await invoke<number>("save_ledger_entries_batch", { entries });
+      console.log("[saveLedgerEntriesBatch] Batch save complete:", savedCount, "entries saved");
+      return savedCount;
+    } catch (error) {
+      console.error("[saveLedgerEntriesBatch] Batch save failed:", error);
+      // Try saving one by one as fallback
+      console.log("[saveLedgerEntriesBatch] Attempting individual saves as fallback...");
+      let fallbackCount = 0;
+      for (const entry of entries) {
+        try {
+          await invoke("save_ledger_entry", { entry });
+          fallbackCount++;
+        } catch (e) {
+          console.error("[saveLedgerEntriesBatch] Individual save failed for:", entry.description, e);
+        }
+      }
+      console.log("[saveLedgerEntriesBatch] Fallback saved:", fallbackCount, "entries");
+      return fallbackCount;
+    }
+  } else {
+    // In browser mode, save to localStorage
+    console.log("[saveLedgerEntriesBatch] Mock batch save:", entries.length, "entries");
+    const existingEntries = JSON.parse(localStorage.getItem("yuki_ledger") || "[]");
+    existingEntries.push(...entries);
+    localStorage.setItem("yuki_ledger", JSON.stringify(existingEntries));
+    return entries.length;
+  }
+}
+
+/**
  * Process a document file (PDF, CSV, TXT) as a financial statement.
  * Creates ledger entries. Handles scanned PDFs by using vision.
+ * @param file The file to process
+ * @param currency Optional currency code (defaults to system default)
  */
-async function processDocument(file: File): Promise<ProcessingResult> {
-  console.log("[processDocument] Starting:", file.name);
+async function processDocument(file: File, currency?: string): Promise<ProcessingResult> {
+  console.log("[processDocument] Starting:", file.name, "currency:", currency);
   const documentId = uuidv4();
 
   // Save file to local storage
@@ -100,37 +182,30 @@ async function processDocument(file: File): Promise<ProcessingResult> {
   // Get categories for parsing
   const categories = await getCategories();
 
-  // If PDF is a scan, use vision-based processing instead
+  // If PDF is a scan, use vision-based statement processing
+  console.log("[processDocument] ========== CHECKING IF SCANNED ==========");
+  console.log("[processDocument] extraction.isScanned:", extraction.isScanned);
+  console.log("[processDocument] extraction.text length:", extraction.text.length);
+
   if (extraction.isScanned) {
-    console.log("[processDocument] Scanned PDF detected, using vision processing...");
-    const receiptData = await parseImage(savedPath, categories);
+    console.log("[processDocument] ========== SCANNED PDF DETECTED ==========");
+    console.log("[processDocument] Using vision-based statement parser...");
+    console.log("[processDocument] Saved path:", savedPath);
+    console.log("[processDocument] Categories:", categories);
 
-    // Create a single ledger entry for the total
-    const categoryId = receiptData.category.toLowerCase().replace(/\s+/g, '-');
-    const ledgerId = uuidv4();
-    const now = new Date().toISOString();
+    const transactions = await parseStatementImage(savedPath, categories);
+    console.log("[processDocument] ========== VISION PARSING COMPLETE ==========");
+    console.log("[processDocument] Vision extracted", transactions.length, "transactions");
+    console.log("[processDocument] First few transactions:", JSON.stringify(transactions.slice(0, 3)));
 
-    const entry: LedgerEntry = {
-      id: ledgerId,
-      document_id: documentId,
-      account_id: "default",
-      date: receiptData.date,
-      description: `${receiptData.merchant}`,
-      amount: -receiptData.total,
-      currency: "USD",
-      category_id: categoryId,
-      merchant: receiptData.merchant,
-      notes: null,
-      source: "scanned-pdf",
-      created_at: now,
-    };
-
-    await saveLedgerEntryDirect(entry);
+    // Use batch save for better performance and to avoid DB locking issues
+    const savedCount = await saveLedgerEntriesBatch(transactions, documentId, currency);
+    console.log("[processDocument] Saved", savedCount, "of", transactions.length, "transactions");
 
     return {
       filename: file.name,
-      transactionCount: 1,
-      message: `Processed scanned PDF from ${receiptData.merchant}: $${receiptData.total.toFixed(2)}.`,
+      transactionCount: savedCount,
+      message: `Processed scanned statement: found ${transactions.length} transaction${transactions.length !== 1 ? 's' : ''}, saved ${savedCount}.`,
     };
   }
 
@@ -141,7 +216,7 @@ async function processDocument(file: File): Promise<ProcessingResult> {
 
   // Save transactions to ledger
   for (const txn of transactions) {
-    await saveLedgerEntry(txn, documentId);
+    await saveLedgerEntry(txn, documentId, currency);
   }
 
   return {
@@ -339,11 +414,11 @@ async function processImageAsReceipt(file: File): Promise<ProcessingResult> {
 }
 
 /**
- * Process an image file as a statement (creates ledger entry).
+ * Process an image file as a statement (creates ledger entries).
  * This is for cases where someone uploads an image of a bank statement.
  */
-async function processImageAsStatement(file: File): Promise<ProcessingResult> {
-  console.log("[processImageAsStatement] Starting:", file.name);
+async function processImageAsStatement(file: File, currency?: string): Promise<ProcessingResult> {
+  console.log("[processImageAsStatement] Starting:", file.name, "currency:", currency);
   const documentId = uuidv4();
 
   // Save file to local storage
@@ -364,35 +439,20 @@ async function processImageAsStatement(file: File): Promise<ProcessingResult> {
   // Get categories for parsing
   const categories = await getCategories();
 
-  // Parse image with vision model
-  const receiptData = await parseImage(savedPath, categories);
+  // Parse image with vision model - use statement parser for multiple transactions
+  console.log("[processImageAsStatement] Using vision-based statement parser...");
+  const transactions = await parseStatementImage(savedPath, categories);
+  console.log("[processImageAsStatement] Extracted", transactions.length, "transactions");
 
-  // Create a single ledger entry for the total
-  const categoryId = receiptData.category.toLowerCase().replace(/\s+/g, '-');
-  const ledgerId = uuidv4();
-  const now = new Date().toISOString();
-
-  const entry: LedgerEntry = {
-    id: ledgerId,
-    document_id: documentId,
-    account_id: "default",
-    date: receiptData.date,
-    description: `${receiptData.merchant}`,
-    amount: -receiptData.total,
-    currency: "USD",
-    category_id: categoryId,
-    merchant: receiptData.merchant,
-    notes: null,
-    source: "image",
-    created_at: now,
-  };
-
-  await saveLedgerEntryDirect(entry);
+  // Save all transactions to ledger
+  for (const txn of transactions) {
+    await saveLedgerEntry(txn, documentId, currency);
+  }
 
   return {
     filename: file.name,
-    transactionCount: 1,
-    message: `Processed statement from ${receiptData.merchant}: $${receiptData.total.toFixed(2)}.`,
+    transactionCount: transactions.length,
+    message: `Processed statement image: found ${transactions.length} transaction${transactions.length !== 1 ? 's' : ''}.`,
   };
 }
 
@@ -526,9 +586,10 @@ async function getCategories(): Promise<string[]> {
  */
 async function saveLedgerEntry(
   txn: ExtractedTransaction,
-  documentId: string
+  documentId: string,
+  currencyOverride?: string
 ): Promise<void> {
-  console.log("[saveLedgerEntry] Saving transaction:", txn.description);
+  console.log("[saveLedgerEntry] Saving transaction:", txn.description, "currency:", currencyOverride || txn.currency);
 
   // Convert category name to lowercase ID to match database
   // Database has IDs like "income", "housing", "dining" (lowercase)
@@ -542,7 +603,7 @@ async function saveLedgerEntry(
     date: txn.date,
     description: txn.description,
     amount: txn.amount,
-    currency: txn.currency,
+    currency: currencyOverride || txn.currency,
     category_id: categoryId,
     merchant: txn.merchant,
     notes: null,

@@ -19,6 +19,15 @@ export interface Account {
   created_at: string;
 }
 
+export interface Currency {
+  code: string;
+  name: string;
+  symbol: string;
+  conversionRate: number;
+  isPrimary: boolean;
+  createdAt: string;
+}
+
 export interface LedgerEntry {
   id: string;
   document_id: string | null;

@@ -244,6 +244,55 @@ export async function parseImage(
 }
 
 /**
+ * Parse a bank statement image/PDF using vision to extract transactions.
+ * Used for scanned PDFs that can't be text-extracted.
+ */
+export async function parseStatementImage(
+  imagePath: string,
+  categories: string[]
+): Promise<ExtractedTransaction[]> {
+  console.log("[parseStatementImage] ========== STARTING ==========");
+  console.log("[parseStatementImage] Image path:", imagePath);
+  console.log("[parseStatementImage] Categories:", categories);
+
+  const invoke = await getTauriInvoke();
+  console.log("[parseStatementImage] Got invoke function:", !!invoke);
+
+  if (invoke) {
+    try {
+      console.log("[parseStatementImage] Calling parse_statement_image command...");
+      const result = await invoke<ExtractedTransaction[]>("parse_statement_image", {
+        imagePath,
+        categories,
+      });
+      console.log("[parseStatementImage] ========== SUCCESS ==========");
+      console.log("[parseStatementImage] Extracted", result.length, "transactions");
+      if (result.length > 0) {
+        console.log("[parseStatementImage] First transaction:", JSON.stringify(result[0]));
+      }
+      return result;
+    } catch (error) {
+      console.error("[parseStatementImage] ========== ERROR ==========");
+      console.error("[parseStatementImage] Parse statement error:", error);
+      throw error;
+    }
+  }
+
+  console.log("[parseStatementImage] No invoke available, returning mock data");
+  // Mock for browser development
+  return [
+    {
+      date: "2025-01-15",
+      description: "Sample transaction from scanned statement",
+      amount: -50.0,
+      currency: "USD",
+      category: "Shopping",
+      merchant: "Sample Store",
+    },
+  ];
+}
+
+/**
  * Detect if a conversational message contains expense information.
  */
 export async function detectExpense(
